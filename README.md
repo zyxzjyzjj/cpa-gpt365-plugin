@@ -39,6 +39,66 @@ CPA 会按运行平台下载 `gpt365_<version>_<goos>_<goarch>.zip`，并用同�
 
 CPA 必须是 CGO 构建（管理接口响应头会标明动态库插件支持）。
 
+## 导入令牌
+
+插件有**独立的凭据提供者**（provider 标识 `gpt365`），不依赖 Codex 凭据。
+
+### 方式一：管理页面（推荐）
+
+打开：
+
+```text
+http://localhost:8317/v0/resource/plugins/gpt365/
+```
+
+在页面里直接粘贴令牌，一行一条，点「导入」。页面同时显示每条凭据的账号、过期时间与状态，支持单条或全部删除。
+
+### 方式二：管理接口
+
+```bash
+curl -X POST http://localhost:8317/v0/management/plugins/gpt365/import \
+  -H "Authorization: Bearer <管理密钥>" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "eyJhbGciOi...\neyJhbGciOi...\n"}'
+```
+
+也支持结构化列表：
+
+```json
+{ "tokens": ["<token1>", { "access_token": "<token2>", "account_id": "..." }] }
+```
+
+支持的输入形态（页面与接口一致）：
+
+- 纯 `access_token`（JWT 或任意字符串）
+- `access_token: xxx` 或 `access_token=xxx`
+- 带 `Bearer ` 前缀、被引号包裹
+- 完整 JSON 对象（`refresh_token` 等额外字段会保留）
+
+导入经宿主凭据接口写入 `auth-dir`，**立即生效，无需重启**。同一账号重复导入会覆盖同一文件，不会堆积副本。
+
+### 方式三：手动放置文件
+
+在 CPA 的 `auth-dir` 下新建 `gpt365-<账号>.json`：
+
+```json
+{
+  "type": "gpt365",
+  "access_token": "eyJhbGciOi...",
+  "account_id": "b3f49d1b-538c-4788-be4b-ce7912603dfc"
+}
+```
+
+`type` 必须是 `gpt365`，否则不会被本插件接管。
+
+### 其他管理接口
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/v0/management/plugins/gpt365/auths` | 列出本插件凭据（不含令牌本体） |
+| POST | `/v0/management/plugins/gpt365/import` | 批量导入 |
+| POST | `/v0/management/plugins/gpt365/delete` | 批量删除（`{"names":[...]}` 或 `{"all":true}`） |
+
 ## 这个插件解决什么问题
 
 本机无法直连远程轮换代理，必须经本地代理转发；而 CPA 宿主的 HTTP 传输只支持
@@ -149,6 +209,9 @@ proxy_chain:
   不把服务端注入工具或损坏的中转载荷交给客户端。
 - 认证解析会同时产出**原生 Codex 记录**与**本插件虚拟记录**，使既有 Codex 模型
   继续走 CPA 原生执行器，只有本插件的别名走 Basis Points。
+- 本插件只解析 `type: gpt365` 的凭据文件，不会接管 Codex 或其他提供者的凭据。
+- 删除操作只允许作用于 `gpt365-*.json`，拒绝删除其他提供者的凭据。
+- 管理页面不内联任何令牌；列表接口只返回账号、过期时间与状态。
 
 ## 已知限制
 

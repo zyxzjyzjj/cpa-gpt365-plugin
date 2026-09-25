@@ -57,8 +57,14 @@ plugins:
       max_response_bytes: 67108864
 
       # 认证模式，通常保持 chatgpt。
-      # 凭据来自 CPA 中已有的 ChatGPT/Codex OAuth 文件，
-      # 不要在此填写 access_token 或 refresh_token。
+      #
+      # 凭据由本插件自己管理：导入的令牌会成为 auth-dir 下 type 为 gpt365
+      # 的凭据文件，由本插件的 auth provider 解析。
+      #
+      # 导入方式（任选其一）：
+      #   1. 打开 /v0/resource/plugins/gpt365/ 页面，批量粘贴令牌
+      #   2. 调用 POST /v0/management/plugins/gpt365/import
+      #   3. 直接把凭据 JSON 放进 auth-dir，type 写 gpt365
       auth_mode: chatgpt
 
       # 非敏感配置的持久化目录。留空表示只由本文件管理配置。

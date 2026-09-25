@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -210,11 +209,40 @@ func credentialID(fileName string) string {
 	return builder.String()
 }
 
-// authData 构造本插件的虚拟认证记录。
+// authData 构造本插件的认证记录。
+//
+// Attributes 里的 account_id 会进入执行器请求的 AuthAttributes，
+// 执行阶段据此还原账号；Metadata 供管理界面展示。
 func authData(raw []byte, fileName string, c credential) map[string]any {
 	label := c.Email
 	if label == "" {
+		label = c.AccountID
+	}
+	if label == "" {
 		label = fileName
+	}
+	metadata := map[string]any{
+		"type":       Provider,
+		"auth_kind":  "oauth",
+		"account_id": c.AccountID,
+		"auth_mode":  c.AuthMode,
+	}
+	attributes := map[string]string{
+		"auth_kind": "oauth",
+		"auth_mode": c.AuthMode,
+	}
+	if c.AccountID != "" {
+		attributes["account_id"] = c.AccountID
+	}
+	if c.Email != "" {
+		metadata["email"] = c.Email
+	}
+	if planType := codexPlanType(raw, c.AccessToken); planType != "" {
+		metadata["plan_type"] = planType
+		attributes["plan_type"] = planType
+	}
+	if !c.ExpiresAt.IsZero() {
+		metadata["expires_at"] = c.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	return map[string]any{
 		"Provider":    Provider,
@@ -222,69 +250,12 @@ func authData(raw []byte, fileName string, c credential) map[string]any {
 		"FileName":    fileName,
 		"Label":       label,
 		"StorageJSON": raw,
-		"Metadata": map[string]any{
-			"type":       Provider,
-			"auth_kind":  "oauth",
-			"account_id": c.AccountID,
-			"auth_mode":  c.AuthMode,
-		},
-		"Attributes": map[string]string{
-			"auth_kind":  "oauth",
-			"account_id": c.AccountID,
-			"auth_mode":  c.AuthMode,
-		},
-	}
-}
-
-// nativeCodexAuthData 保留一份原生 Codex 记录。
-//
-// 这样既有的 Codex 模型继续由 CPA 原生执行器处理，只有本插件的别名走
-// Basis Points。缺少这一步会让接管 codex 凭据的插件顶掉原生模型。
-func nativeCodexAuthData(raw []byte, fileName string, c credential) (map[string]any, error) {
-	label := c.Email
-	if label == "" {
-		label = fileName
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return nil, fail(400, "invalid_auth", "OAuth 凭据不是合法的 JSON")
-	}
-	metadata["type"] = AuthProviderID
-	metadata["auth_kind"] = "oauth"
-	metadata["access_token"] = c.AccessToken
-	if firstString(metadata, "account_id") == "" {
-		metadata["account_id"] = c.AccountID
-	}
-	attributes := map[string]string{
-		"auth_kind":  "oauth",
-		"account_id": c.AccountID,
-		"auth_mode":  c.AuthMode,
-	}
-	if planType := codexPlanType(raw, c.AccessToken); planType != "" {
-		metadata["plan_type"] = planType
-		attributes["plan_type"] = planType
-	}
-	if priority, ok := metadata["priority"].(float64); ok {
-		attributes["priority"] = strconv.Itoa(int(priority))
-	} else if priority := strings.TrimSpace(stringValue(metadata["priority"])); priority != "" {
-		if _, err := strconv.Atoi(priority); err == nil {
-			attributes["priority"] = priority
-		}
-	}
-	if note := strings.TrimSpace(stringValue(metadata["note"])); note != "" {
-		attributes["note"] = note
-	}
-	return map[string]any{
-		"Provider":    AuthProviderID,
-		"ID":          fileName,
-		"FileName":    fileName,
-		"Label":       label,
-		"StorageJSON": raw,
 		"Metadata":    metadata,
 		"Attributes":  attributes,
-	}, nil
+	}
 }
 
+// codexPlanType 从凭据或令牌中读取套餐类型，用于界面展示。
 func codexPlanType(raw []byte, accessToken string) string {
 	var root map[string]any
 	if json.Unmarshal(raw, &root) == nil {
@@ -305,14 +276,18 @@ func codexPlanType(raw []byte, accessToken string) string {
 	return ""
 }
 
+// authParse 解析属于本插件的凭据文件。
+//
+// 只接管 type 为 gpt365 的文件：凭据文件里的 type 字段由使用者或本插件的
+// 导入接口写入，因此不会与 Codex 等其他提供者互相干扰。
 func authParse(raw []byte) (map[string]any, error) {
 	var request authParseRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, fail(400, "invalid_request", "auth.parse 请求无法解析")
 	}
 	provider := strings.ToLower(strings.TrimSpace(request.Provider))
-	// 只接管 codex / 本插件 / openai 三类，其余交给其他插件处理。
-	if provider != "" && provider != "codex" && provider != Provider && provider != "openai" {
+	// 只认自己的 provider，其余一律交给别的插件处理。
+	if provider != "" && provider != Provider {
 		return map[string]any{"Handled": false}, nil
 	}
 	fileName := strings.TrimSpace(request.FileName)
@@ -320,28 +295,103 @@ func authParse(raw []byte) (map[string]any, error) {
 		fileName = filepath.Base(strings.TrimSpace(request.Path))
 	}
 	if fileName == "" {
-		fileName = "chatgpt.json"
+		fileName = "gpt365.json"
 	}
 	c, err := parseCredential(request.RawJSON)
 	if err != nil {
 		if provider == Provider {
 			return nil, err
 		}
-		// 其他提供者的文件解析失败时不应阻断其加载。
 		return map[string]any{"Handled": false}, nil
 	}
-	virtual := authData(request.RawJSON, fileName, c)
-	if provider == Provider {
-		return map[string]any{"Handled": true, "Auth": virtual}, nil
+	return map[string]any{"Handled": true, "Auth": authData(request.RawJSON, fileName, c)}, nil
+}
+
+// ParseTokenInput 解析用户提供的单条凭据输入。
+//
+// 支持三种常见形态，便于批量导入时直接粘贴：
+//
+//  1. 纯 access_token（JWT 或任意字符串）—— 最常见
+//  2. 形如 "access_token: xxx" 或 "access_token=xxx" 的单行键值
+//  3. 完整 JSON 对象，含 access_token / account_id 等字段
+//
+// 返回的凭据 JSON 会被规范化为 CPA 凭据文件格式（带 type 字段）。
+func ParseTokenInput(input string) ([]byte, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return nil, fail(400, "invalid_token", "令牌为空")
 	}
-	native, errNative := nativeCodexAuthData(request.RawJSON, fileName, c)
-	if errNative != nil {
-		return nil, errNative
+
+	// 形态 3：完整 JSON。
+	if strings.HasPrefix(trimmed, "{") {
+		c, errParse := parseCredential([]byte(trimmed))
+		if errParse != nil {
+			return nil, errParse
+		}
+		return buildAuthFileJSON(trimmed, c)
 	}
-	return map[string]any{
-		"Handled": true,
-		"Auths":   []any{native, virtual},
-	}, nil
+
+	// 形态 2：单行键值。仅剥离前缀，其余原样作为令牌。
+	token := trimmed
+	if index := strings.Index(token, ":"); index >= 0 && !strings.Contains(token[:index], ".") {
+		token = strings.TrimSpace(token[index+1:])
+	} else if index := strings.Index(token, "="); index >= 0 && !strings.Contains(token[:index], ".") {
+		token = strings.TrimSpace(token[index+1:])
+	}
+	token = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(token), "Bearer "))
+	token = strings.Trim(strings.TrimSpace(token), `"'`)
+	if token == "" {
+		return nil, fail(400, "invalid_token", "令牌为空")
+	}
+
+	// 形态 1：纯令牌。账号 ID 由 JWT 声明推导。
+	c, errParse := parseCredential(jsonBytes(map[string]any{"access_token": token}))
+	if errParse != nil {
+		return nil, errParse
+	}
+	return buildAuthFileJSON("", c)
+}
+
+// buildAuthFileJSON 生成 CPA 凭据文件内容。
+//
+// type 字段必须写成本插件的 provider，这样文件才会被 auth.parse 接管；
+// 同时保留原始令牌，使 CPA 能把它作为持久化内容交给执行器。
+func buildAuthFileJSON(original string, c credential) ([]byte, error) {
+	payload := map[string]any{
+		"type":         Provider,
+		"access_token": c.AccessToken,
+	}
+	if c.AccountID != "" {
+		payload["account_id"] = c.AccountID
+	}
+	if c.Email != "" {
+		payload["email"] = c.Email
+	}
+	if !c.ExpiresAt.IsZero() {
+		payload["expires_at"] = c.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	// 原始 JSON 中的额外字段（refresh_token 等）一并保留，避免丢信息。
+	if strings.HasPrefix(strings.TrimSpace(original), "{") {
+		var root map[string]any
+		if json.Unmarshal([]byte(original), &root) == nil {
+			for key, value := range root {
+				if _, exists := payload[key]; !exists {
+					payload[key] = value
+				}
+			}
+			payload["type"] = Provider
+		}
+	}
+	return json.MarshalIndent(payload, "", "  ")
+}
+
+// AuthFileJSON 供管理接口构造凭据文件内容。
+func AuthFileJSON(c credential) ([]byte, error) { return buildAuthFileJSON("", c) }
+
+// AccountIDFromToken 从令牌推导账号 ID，用于导入时去重与命名。
+func AccountIDFromToken(token string) string {
+	claims := jwtPayload(token)
+	return accountIDFromClaims(claims)
 }
 
 func authRefresh(raw []byte) (map[string]any, error) {

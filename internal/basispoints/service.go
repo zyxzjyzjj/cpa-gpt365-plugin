@@ -139,6 +139,12 @@ func (s *Service) Handle(method string, raw json.RawMessage) (any, error) {
 	case "executor.http_request":
 		return nil, fail(400, "unsupported_method", "请使用本插件的 Basis Points 模型执行器")
 
+	case "management.register":
+		return managementRegistration(), nil
+
+	case "management.handle":
+		return s.managementHandle(raw)
+
 	default:
 		return nil, fail(400, "unsupported_method", "不支持的插件方法: "+method)
 	}
@@ -265,7 +271,8 @@ func registration(cfg Config) map[string]any {
 			"executor_input_formats":  []string{"openai-response"},
 			"executor_output_formats": []string{"openai-response"},
 			"response_interceptor":    true,
-			"management_api":          false,
+			// 开启管理接口，提供凭据批量导入与状态页面。
+			"management_api": true,
 		},
 		"config": cfg,
 	}

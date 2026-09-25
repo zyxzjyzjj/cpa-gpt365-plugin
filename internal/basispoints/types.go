@@ -16,15 +16,17 @@ import (
 
 const (
 	// Version 是插件版本。
-	Version = "0.1.0"
+	Version = "0.2.0"
 
 	// Provider 是执行器标识与模型归属标识，必须为小写。
 	Provider = "gpt365"
 
-	// AuthProviderID 声明本插件解析哪一类凭据文件。
-	// 取 "codex" 表示接管 CPA 中既有的 ChatGPT/Codex OAuth 凭据，
-	// 而不新增一份 token 文件。
-	AuthProviderID = "codex"
+	// AuthProviderID 是本插件在 CPA 中独占的凭据提供者标识。
+	//
+	// 必须是插件自己的名字，不能复用 "codex"：CPA 用凭据文件里的 type 字段
+	// 决定由哪个 auth provider 解析，复用 codex 会让插件寄生在 Codex 凭据上，
+	// 于是既没有独立 provider，也没有 token 录入入口。
+	AuthProviderID = "gpt365"
 
 	// PluginID 与动态库文件名保持一致。
 	PluginID = Provider

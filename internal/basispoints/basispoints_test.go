@@ -362,15 +362,18 @@ func TestSchemaMatches(t *testing.T) {
 	}
 }
 
-// TestAuthParseProducesNativeAndVirtual 确认同时产出原生 Codex 与本插件记录。
-func TestAuthParseProducesNativeAndVirtual(t *testing.T) {
-	raw := []byte(`{"access_token":"` + buildJWT(map[string]any{
+// TestAuthParseHandlesOwnProvider 本插件只接管 type 为自己的凭据文件。
+//
+// 这是修复「插件没有独立 provider」的关键：不再寄生在 codex 凭据上，
+// 因此不会与其他提供者互相干扰，也才有自己的 token 录入入口。
+func TestAuthParseHandlesOwnProvider(t *testing.T) {
+	raw := []byte(`{"type":"gpt365","access_token":"` + buildJWT(map[string]any{
 		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-1"},
 		"exp":                         float64(4102444800),
-	}) + `","refresh_token":"rt"}`)
+	}) + `"}`)
 	request, _ := json.Marshal(map[string]any{
-		"Provider": "codex",
-		"FileName": "chatgpt.json",
+		"Provider": Provider,
+		"FileName": "gpt365-acct-1.json",
 		"RawJSON":  raw,
 	})
 	result, err := authParse(request)
@@ -378,34 +381,54 @@ func TestAuthParseProducesNativeAndVirtual(t *testing.T) {
 		t.Fatalf("authParse 失败: %v", err)
 	}
 	if result["Handled"] != true {
-		t.Fatal("应声明已处理 codex 凭据")
+		t.Fatalf("应声明已处理本插件凭据，实际 %#v", result)
 	}
-	auths, _ := result["Auths"].([]any)
-	if len(auths) != 2 {
-		t.Fatalf("应产出 2 条认证（原生 + 虚拟），实际 %d", len(auths))
+	auth := objectValue(result["Auth"])
+	if stringValue(auth["Provider"]) != Provider {
+		t.Errorf("Provider = %q，期望 %q", stringValue(auth["Provider"]), Provider)
 	}
-	native := objectValue(auths[0])
-	virtual := objectValue(auths[1])
-	if stringValue(native["Provider"]) != AuthProviderID {
-		t.Errorf("原生记录 Provider = %q，期望 %q", stringValue(native["Provider"]), AuthProviderID)
+	// 账号 ID 必须进入 Attributes，执行阶段据此还原账号。
+	// Attributes 在进程内是 map[string]string，经 JSON 传输后才是 map[string]any，
+	// 因此两种类型都要能读。
+	if got := attrValue(auth["Attributes"], "account_id"); got != "acct-1" {
+		t.Errorf("Attributes.account_id = %q，期望 acct-1", got)
 	}
-	if stringValue(virtual["Provider"]) != Provider {
-		t.Errorf("虚拟记录 Provider = %q，期望 %q", stringValue(virtual["Provider"]), Provider)
-	}
-	if !strings.HasPrefix(stringValue(virtual["ID"]), "bp-") {
-		t.Errorf("虚拟记录 ID = %q，应带 bp- 前缀", stringValue(virtual["ID"]))
+	if stringValue(auth["FileName"]) != "gpt365-acct-1.json" {
+		t.Errorf("FileName = %q", stringValue(auth["FileName"]))
 	}
 }
 
-// TestAuthParseIgnoresForeignProvider 其他提供者的凭据必须放行给别的插件。
-func TestAuthParseIgnoresForeignProvider(t *testing.T) {
-	request, _ := json.Marshal(map[string]any{"Provider": "codearts", "RawJSON": []byte(`{}`)})
-	result, err := authParse(request)
-	if err != nil {
-		t.Fatalf("不应报错: %v", err)
+// attrValue 兼容 map[string]string 与 map[string]any 两种承载形式。
+func attrValue(container any, key string) string {
+	switch typed := container.(type) {
+	case map[string]string:
+		return typed[key]
+	case map[string]any:
+		return stringValue(typed[key])
 	}
-	if result["Handled"] != false {
-		t.Error("非本插件负责的提供者应返回 Handled=false")
+	return ""
+}
+
+// TestAuthParseIgnoresForeignProvider 其他提供者的凭据必须放行给别的插件。
+//
+// 尤其是 codex：本插件不再接管它，避免顶掉 CPA 原生的 Codex 模型。
+func TestAuthParseIgnoresForeignProvider(t *testing.T) {
+	for _, provider := range []string{"codearts", "codex", "openai", "claude"} {
+		raw := []byte(`{"access_token":"` + buildJWT(map[string]any{
+			"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-1"},
+		}) + `"}`)
+		request, _ := json.Marshal(map[string]any{
+			"Provider": provider,
+			"FileName": provider + ".json",
+			"RawJSON":  raw,
+		})
+		result, err := authParse(request)
+		if err != nil {
+			t.Fatalf("%s: 不应报错: %v", provider, err)
+		}
+		if result["Handled"] != false {
+			t.Errorf("%s: 非本插件负责的提供者应返回 Handled=false", provider)
+		}
 	}
 }
 

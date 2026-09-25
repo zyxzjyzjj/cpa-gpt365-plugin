@@ -167,11 +167,75 @@ const authPageHTML = `<!DOCTYPE html>
     margin-bottom: 20px;
     font-size: 13px;
   }
+
+  /* 代理池编辑区：行式布局，一行一条出口。 */
+  .pool-row {
+    display: grid;
+    grid-template-columns: 1fr 2.2fr auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .pool-row input { width: 100%; }
+  .pool-row .ghost { padding: 9px 12px; }
+  .pool-head {
+    display: grid;
+    grid-template-columns: 1fr 2.2fr auto;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 6px;
+  }
+  .pool-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--ink-faint);
+    border: 1px dashed var(--line-strong);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .switch-row label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  .switch-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field > span {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .field input, .field select {
+    padding: 8px 10px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink);
+    background: #fcfcfb;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+  }
+  .field input:focus, .field select:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent);
+  }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
   @media (max-width: 640px) {
     .wrap { padding: 24px 16px 56px; }
     .stats { gap: 20px; }
     th:nth-child(4), td:nth-child(4) { display: none; }
+    .pool-row, .pool-head { grid-template-columns: 1fr; }
+    .pool-head { display: none; }
+    .grid-3 { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -209,6 +273,60 @@ const authPageHTML = `<!DOCTYPE html>
       <button class="ghost" id="btn-key">保存并测试</button>
       <span class="note" id="key-state"></span>
     </div>
+  </section>
+
+  <section>
+    <h2>代理池</h2>
+    <p class="hint">
+      为每个账号分配独立出口。多个账号共用一个出口 IP 时，上游容易把它们关联
+      起来并触发风控；启用后每个账号固定走自己的出口。出口只替换远程代理，
+      本地代理那一跳保持不变。
+    </p>
+
+    <div class="switch-row">
+      <label><input type="checkbox" id="pool-enabled"> 启用代理池</label>
+      <label><input type="checkbox" id="pool-strict"> 严格模式</label>
+      <span class="note" title="严格模式下没有可用出口会让请求直接失败，而不是回退到全局代理链">
+        严格模式：无出口时直接失败
+      </span>
+    </div>
+
+    <div class="pool-head">
+      <span>名称</span><span>代理地址</span><span></span>
+    </div>
+    <div id="pool-rows"></div>
+    <div class="row">
+      <button class="ghost" id="btn-add-proxy">添加出口</button>
+      <span class="note" id="pool-count"></span>
+    </div>
+
+    <div class="grid-3" style="margin-top:16px">
+      <label class="field">
+        <span>分配策略</span>
+        <select id="pool-strategy">
+          <option value="hash">hash — 按账号稳定散列</option>
+          <option value="sticky">sticky — 按导入顺序</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>会话粘性</span>
+        <select id="sticky-enabled">
+          <option value="on">开启 — 同会话固定账号</option>
+          <option value="off">关闭</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>绑定有效期（秒）</span>
+        <input type="number" id="sticky-ttl" min="60" max="604800" step="60" value="3600">
+      </label>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="btn-save-pool">保存配置</button>
+      <button class="ghost" id="btn-rebind">重新分配出口</button>
+      <span class="note" id="pool-state"></span>
+    </div>
+    <div class="log" id="pool-log"></div>
   </section>
 
   <section>
@@ -366,6 +484,194 @@ eyJhbGciOiJSUzI1NiIs…
 
   function el(id) { return document.getElementById(id); }
 
+  // ---- 代理池编辑 ------------------------------------------------------------
+  //
+  // 配置的权威在宿主：保存时调用宿主的插件配置接口
+  // PATCH /v0/management/plugins/gpt365/config，由宿主写盘并触发热重载。
+  // 插件自己的路由不能覆盖宿主已有路由，因此这里直接调宿主接口。
+  //
+  // 口令处理：接口只回传主机名，不回传口令。编辑时口令框留空表示保持原值；
+  // 若用户改了地址但没填口令，则按「无凭据地址」保存。
+
+  var poolState = { entries: [], original: [] };
+
+  function newPoolRow(name, url, hasCreds) {
+    var row = document.createElement("div");
+    row.className = "pool-row";
+
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "jp-1";
+    nameInput.value = name || "";
+
+    var urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.placeholder = "http://user:pass@host:10000";
+    urlInput.value = url || "";
+
+    var remove = document.createElement("button");
+    remove.className = "ghost";
+    remove.type = "button";
+    remove.textContent = "移除";
+    remove.addEventListener("click", function () {
+      row.parentNode.removeChild(row);
+      updatePoolCount();
+    });
+
+    if (hasCreds) {
+      urlInput.placeholder = "留空保持不变（已配置凭据）";
+    }
+
+    row.appendChild(nameInput);
+    row.appendChild(urlInput);
+    row.appendChild(remove);
+    return row;
+  }
+
+  function updatePoolCount() {
+    var rows = el("pool-rows").querySelectorAll(".pool-row");
+    el("pool-count").textContent = rows.length ? (rows.length + " 个出口") : "";
+    var empty = el("pool-rows").querySelector(".pool-empty");
+    if (rows.length === 0 && !empty) {
+      var hint = document.createElement("div");
+      hint.className = "pool-empty";
+      hint.textContent = "还没有配置出口。未启用时所有账号共用全局代理链。";
+      el("pool-rows").appendChild(hint);
+    } else if (rows.length > 0 && empty) {
+      el("pool-rows").removeChild(empty);
+    }
+  }
+
+  function renderPool(settings) {
+    var pool = (settings && settings.proxy_pool) || {};
+    var sticky = (settings && settings.sticky_session) || {};
+
+    el("pool-enabled").checked = !!pool.enabled;
+    el("pool-strict").checked = !!pool.strict;
+    el("pool-strategy").value = pool.strategy || "hash";
+    el("sticky-enabled").value = sticky.enabled ? "on" : "off";
+    el("sticky-ttl").value = sticky.ttl_seconds || 3600;
+
+    poolState.original = pool.entries || [];
+    el("pool-rows").innerHTML = "";
+    poolState.original.forEach(function (entry) {
+      // 已有条目只显示主机名，口令不回传；地址框留空即保持原值。
+      el("pool-rows").appendChild(newPoolRow(entry.name, "", entry.has_credentials));
+    });
+    updatePoolCount();
+  }
+
+  // collectPoolEntries 汇总编辑区的出口列表。
+  //
+  // 返回 { entries, keepNames }：keepNames 是地址留空、需要沿用原值的条目名，
+  // 它们由后端按原名保留原地址，避免把口令回传到浏览器再传回来。
+  function collectPoolEntries() {
+    var rows = el("pool-rows").querySelectorAll(".pool-row");
+    var entries = [];
+    var keepNames = [];
+    Array.prototype.forEach.call(rows, function (row) {
+      var inputs = row.querySelectorAll("input");
+      var name = inputs[0].value.trim();
+      var url = inputs[1].value.trim();
+      if (!name && !url) return;
+      if (!url) {
+        if (name) keepNames.push(name);
+        return;
+      }
+      entries.push({ name: name, url: url });
+    });
+    return { entries: entries, keepNames: keepNames };
+  }
+
+  function showPoolLog(items) {
+    var log = el("pool-log");
+    log.innerHTML = items.map(function (it) {
+      return '<div class="log-item ' + (it.ok ? "ok" : "err") + '">' +
+        esc((it.ok ? "✓ " : "✕ ") + it.text) + "</div>";
+    }).join("");
+    log.className = "log show";
+  }
+
+  function savePool() {
+    var collected = collectPoolEntries();
+    var payload = {
+      proxy_pool: {
+        enabled: el("pool-enabled").checked,
+        strict: el("pool-strict").checked,
+        strategy: el("pool-strategy").value,
+        entries: collected.entries,
+        // 地址留空的条目按原名保留原值，由后端合并。
+        keep_entries: collected.keepNames
+      },
+      sticky_session: {
+        enabled: el("sticky-enabled").value === "on",
+        ttl_seconds: parseInt(el("sticky-ttl").value, 10) || 3600
+      }
+    };
+
+    var btn = el("btn-save-pool");
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+    el("pool-state").textContent = "";
+
+    // 保存到宿主的插件配置：由宿主写盘并触发热重载。
+    fetch("/v0/management/plugins/gpt365/config", {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify(payload)
+    }).then(function (resp) {
+      return resp.text().then(function (text) {
+        if (!resp.ok) {
+          var msg = text || ("HTTP " + resp.status);
+          if (resp.status === 401 || resp.status === 403) {
+            msg = "管理密钥无效或未填写";
+          }
+          throw new Error(msg);
+        }
+        return text;
+      });
+    }).then(function () {
+      showPoolLog([{ ok: true, text: "已保存，宿主已重新加载插件配置" }]);
+      el("pool-state").textContent = "已保存";
+      return loadSettings();
+    }).catch(function (err) {
+      showPoolLog([{ ok: false, text: "保存失败：" + err.message }]);
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = "保存配置";
+    });
+  }
+
+  function rebind() {
+    var btn = el("btn-rebind");
+    btn.disabled = true;
+    btn.textContent = "分配中…";
+    api("/rebind", { method: "POST", body: JSON.stringify({ force: true }) })
+      .then(function (data) {
+        showPoolLog([{
+          ok: true,
+          text: "重新分配完成：成功 " + (data.rebound || 0) +
+            "，跳过 " + (data.skipped || 0) + "，失败 " + (data.failed || 0)
+        }]);
+        return loadSettings();
+      })
+      .catch(function (err) {
+        showPoolLog([{ ok: false, text: "分配失败：" + err.message }]);
+      })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = "重新分配出口";
+      });
+  }
+
+  function loadSettings() {
+    return api("/settings").then(function (data) {
+      renderPool(data);
+    }).catch(function (err) {
+      el("pool-state").textContent = err.message;
+    });
+  }
+
   function countLines() {
     var text = el("input").value;
     var n = text.split(/\r?\n/).filter(function (l) {
@@ -520,6 +826,14 @@ eyJhbGciOiJSUzI1NiIs…
     el("btn-import").addEventListener("click", doImport);
     el("btn-refresh").addEventListener("click", load);
     el("btn-delete-all").addEventListener("click", removeAll);
+    el("btn-add-proxy").addEventListener("click", function () {
+      var empty = el("pool-rows").querySelector(".pool-empty");
+      if (empty) el("pool-rows").removeChild(empty);
+      el("pool-rows").appendChild(newPoolRow("", "", false));
+      updatePoolCount();
+    });
+    el("btn-save-pool").addEventListener("click", savePool);
+    el("btn-rebind").addEventListener("click", rebind);
     el("btn-clear").addEventListener("click", function () {
       el("input").value = "";
       countLines();
@@ -527,6 +841,7 @@ eyJhbGciOiJSUzI1NiIs…
     });
     el("input").addEventListener("input", countLines);
     countLines();
+    loadSettings();
     load().then(function () {
       if (auto) {
         el("key-state").textContent = "已自动读取密钥";

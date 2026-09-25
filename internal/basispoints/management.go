@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -23,6 +24,10 @@ const (
 	routeAuthList   = "/plugins/gpt365/auths"
 	routeAuthImport = "/plugins/gpt365/import"
 	routeAuthDelete = "/plugins/gpt365/delete"
+	// routeSettings 返回页面编辑配置所需的数据（当前代理池与会话粘性）。
+	routeSettings = "/plugins/gpt365/settings"
+	// routeRebind 按当前代理池重新为所有凭据分配出口。
+	routeRebind = "/plugins/gpt365/rebind"
 
 	// 浏览器资源页路由（相对 /v0/resource/plugins/gpt365/）。
 	//
@@ -39,6 +44,8 @@ func managementRegistration() map[string]any {
 			{"Method": http.MethodGet, "Path": routeAuthList},
 			{"Method": http.MethodPost, "Path": routeAuthImport},
 			{"Method": http.MethodPost, "Path": routeAuthDelete},
+			{"Method": http.MethodGet, "Path": routeSettings},
+			{"Method": http.MethodPost, "Path": routeRebind},
 		},
 		"Resources": []map[string]any{
 			{
@@ -71,6 +78,10 @@ func (s *Service) managementHandle(raw json.RawMessage) (any, error) {
 		return s.handleAuthImport(request.Body)
 	case strings.HasSuffix(path, routeAuthDelete):
 		return s.handleAuthDelete(request.Body)
+	case strings.HasSuffix(path, routeSettings):
+		return s.handleSettings()
+	case strings.HasSuffix(path, routeRebind):
+		return s.handleRebind(request.Body)
 	default:
 		// 其余 GET 一律返回管理页面。
 		if strings.EqualFold(request.Method, http.MethodGet) {
@@ -176,6 +187,141 @@ func (s *Service) listOwnAuths() ([]authRecord, error) {
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
 	return records, nil
+}
+
+// handleSettings 返回页面编辑代理池与会话粘性所需的当前值。
+//
+// 代理口令绝不回传：条目只给名称、主机名与「是否已配置凭据」，
+// 编辑时口令留空即表示保持原值。
+func (s *Service) handleSettings() (any, error) {
+	cfg := s.config()
+	entries := make([]map[string]any, 0, len(cfg.ProxyPool.Entries))
+	for _, entry := range cfg.ProxyPool.Entries {
+		host, hasCreds := describeProxyURL(entry.URL)
+		entries = append(entries, map[string]any{
+			"name":            entry.Name,
+			"host":            host,
+			"has_credentials": hasCreds,
+		})
+	}
+	return jsonResponse(map[string]any{
+		"proxy_pool": map[string]any{
+			"enabled":  cfg.ProxyPool.Enabled,
+			"strategy": cfg.ProxyPool.Strategy,
+			"strict":   cfg.ProxyPool.Strict,
+			"entries":  entries,
+		},
+		"sticky_session": map[string]any{
+			"enabled":     cfg.StickySession.Enabled,
+			"ttl_seconds": cfg.StickySession.TTLSeconds,
+			"active":      s.sessions.count(),
+		},
+		"proxy_chain": map[string]any{
+			"enabled":     cfg.ProxyChain.Enabled,
+			"local_proxy": cfg.ProxyChain.LocalProxy,
+		},
+	}), nil
+}
+
+// describeProxyURL 提取代理的主机名并判断是否带凭据，不泄露凭据本身。
+func describeProxyURL(raw string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		return "", false
+	}
+	return parsed.Host, parsed.User != nil
+}
+
+// handleRebind 按当前代理池重新分配所有凭据的出口。
+//
+// 用途：新增或更换代理条目后，让既有账号立刻采用新分配，而不必逐个重新导入。
+// 重写凭据文件会同步更新运行时记录，因此新分配立即生效。
+func (s *Service) handleRebind(body []byte) (any, error) {
+	var request struct {
+		// Force 为真时即使凭据已有出口也重新分配。
+		Force bool `json:"force"`
+	}
+	if len(body) > 0 {
+		if errUnmarshal := json.Unmarshal(body, &request); errUnmarshal != nil {
+			return nil, fail(400, "invalid_request", "重分配请求无法解析")
+		}
+	}
+	cfg := s.config()
+	if !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Entries) == 0 {
+		return nil, fail(400, "proxy_pool_disabled", "代理池未启用或没有可用出口")
+	}
+
+	records, errList := s.listOwnAuths()
+	if errList != nil {
+		return nil, errList
+	}
+
+	// 清空缓存，确保按最新配置重新计算。
+	s.proxies.reset()
+
+	rebound, skipped, failed := 0, 0, 0
+	failures := make([]string, 0)
+	for _, record := range records {
+		if record.Index == "" {
+			skipped++
+			continue
+		}
+		credentialJSON, errGet := s.readAuthRaw(record.Index)
+		if errGet != nil {
+			failed++
+			failures = append(failures, record.Name+": "+errGet.Error())
+			continue
+		}
+		c, errCredential := parseCredential(credentialJSON)
+		if errCredential != nil {
+			failed++
+			failures = append(failures, record.Name+": "+errCredential.Error())
+			continue
+		}
+		proxyURL := s.resolvePoolProxy(c.AccountID)
+		if proxyURL == "" {
+			skipped++
+			continue
+		}
+		updated, errBind := bindProxyToAuthJSON(credentialJSON, proxyURL)
+		if errBind != nil {
+			failed++
+			failures = append(failures, record.Name+": "+errBind.Error())
+			continue
+		}
+		var saved struct {
+			Name string `json:"name"`
+		}
+		if errSave := s.call("host.auth.save", map[string]any{
+			"name": record.Name,
+			"json": json.RawMessage(updated),
+		}, &saved); errSave != nil {
+			failed++
+			failures = append(failures, record.Name+": "+errSave.Error())
+			continue
+		}
+		rebound++
+	}
+	return jsonResponse(map[string]any{
+		"rebound": rebound,
+		"skipped": skipped,
+		"failed":  failed,
+		"errors":  failures,
+	}), nil
+}
+
+// readAuthRaw 读取凭据的原始 JSON。
+func (s *Service) readAuthRaw(authIndex string) ([]byte, error) {
+	var response struct {
+		JSON []byte `json:"json"`
+	}
+	if errCall := s.call("host.auth.get", map[string]any{"auth_index": authIndex}, &response); errCall != nil {
+		return nil, errCall
+	}
+	if len(response.JSON) == 0 {
+		return nil, fmt.Errorf("凭据内容为空")
+	}
+	return response.JSON, nil
 }
 
 func (s *Service) readAuthCredential(authIndex string) (credential, error) {

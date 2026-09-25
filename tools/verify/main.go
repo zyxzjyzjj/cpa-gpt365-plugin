@@ -218,13 +218,22 @@ func main() {
 		`id="mgmt-key"`,
 		// 固定键名读取同源管理面板的密钥（CPA 面板实际使用的键）。
 		`"cli-proxy-auth"`,
+		// 代理池必须能在页面上配置，否则只能改 YAML。
+		`id="pool-enabled"`,
+		`id="pool-rows"`,
+		`id="btn-add-proxy"`,
+		`id="btn-save-pool"`,
+		// 保存走宿主的插件配置接口，由宿主写盘并热重载。
+		`/v0/management/plugins/gpt365/config`,
+		// 会话粘性开关。
+		`id="sticky-enabled"`,
 	} {
 		if !contains(html, marker) {
 			fmt.Printf("✗ 页面缺少关键元素: %s\n", marker)
 			os.Exit(1)
 		}
 	}
-	fmt.Println("✓ 页面包含导入入口、密钥输入框与管理接口调用")
+	fmt.Println("✓ 页面包含导入入口、密钥输入框、代理池配置与管理接口调用")
 
 	// 5) 导入接口：先用结构合法的 JWT 走通导入路径，
 	// 再用一个非法输入确认它被明确拒绝而不是静默成功。
@@ -290,7 +299,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("\n全部验证通过：插件可注册、页面可打开、导入与列表接口可用、调度器已声明")
+	// 9) 设置接口：页面编辑代理池与会话粘性所需的当前值。
+	settingsRaw, _ := callPlugin("management.handle",
+		managementRequest("GET", "/v0/management/plugins/gpt365/settings", nil))
+	settingsBody := decodeManagementBody(extractResult(settingsRaw))
+	fmt.Printf("✓ 设置接口 -> %s\n", truncate(settingsBody, 200))
+	for _, want := range []string{"proxy_pool", "sticky_session", "strategy"} {
+		if !contains(settingsBody, want) {
+			fmt.Printf("✗ 设置接口缺少字段: %s\n", want)
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println("\n全部验证通过：插件可注册、页面可配置代理池、导入与调度接口可用")
 }
 
 // decodeManagementBody 把管理响应信封里的 Body（base64）解成可读 JSON。

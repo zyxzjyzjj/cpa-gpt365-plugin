@@ -72,6 +72,9 @@ func (s *Service) configure(raw json.RawMessage) error {
 			return fail(400, "invalid_config", "插件配置无效: "+err.Error())
 		}
 	}
+	// 页面编辑代理池时，已有条目的口令不会回传，地址框留空表示保持原值。
+	// 这里按上一份生效配置把原地址补回去，再清空辅助字段。
+	cfg.ProxyPool.mergeKeepEntries(s.config().ProxyPool.Entries)
 	// 只持久化非敏感配置；令牌始终留在 CPA 的凭据存储中。
 	if cfg.DataDir != "" {
 		if data, errRead := os.ReadFile(filepath.Join(cfg.DataDir, "settings.json")); errRead == nil {
@@ -95,6 +98,9 @@ func (s *Service) configure(raw json.RawMessage) error {
 	s.cfg = cfg
 	s.stopped = false
 	s.mu.Unlock()
+
+	// 配置变更后旧分配可能失效，清空缓存让下次请求按新配置重新计算。
+	s.proxies.reset()
 	return nil
 }
 

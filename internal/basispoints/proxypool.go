@@ -47,6 +47,49 @@ type ProxyPoolConfig struct {
 	// Strict 为真时，池已启用但没有可用出口会让请求直接失败，
 	// 而不是静默回退到 proxy_chain。用于避免「以为在隔离，其实共用出口」。
 	Strict bool `yaml:"strict" json:"strict"`
+
+	// KeepEntries 是页面提交的辅助字段：列出「地址留空、沿用原值」的条目名。
+	//
+	// 页面上已有条目的口令不会回传（接口只给主机名），因此编辑时地址框留空
+	// 表示保持不变。normalize 会据此把原地址填回去，然后清空该字段，
+	// 使配置中只保留真实条目。
+	KeepEntries []string `yaml:"keep_entries" json:"keep_entries,omitempty"`
+}
+
+// mergeKeepEntries 把「留空保持原值」的条目补回原地址。
+//
+// previous 是当前生效的条目列表。对于 KeepEntries 中列出的名称，
+// 若新列表中该条目缺失或地址为空，则沿用 previous 中同名条目的地址。
+func (p *ProxyPoolConfig) mergeKeepEntries(previous []ProxyPoolEntry) {
+	if p == nil || len(p.KeepEntries) == 0 {
+		return
+	}
+	original := make(map[string]string, len(previous))
+	for _, entry := range previous {
+		original[entry.Name] = entry.URL
+	}
+	// 已有条目中，地址为空的按原名补回。
+	present := map[string]bool{}
+	for index := range p.Entries {
+		entry := &p.Entries[index]
+		present[entry.Name] = true
+		if strings.TrimSpace(entry.URL) == "" {
+			if url, ok := original[entry.Name]; ok {
+				entry.URL = url
+			}
+		}
+	}
+	// 页面上未出现的保留项也一并还原，避免误删。
+	for _, name := range p.KeepEntries {
+		name = strings.TrimSpace(name)
+		if name == "" || present[name] {
+			continue
+		}
+		if url, ok := original[name]; ok {
+			p.Entries = append(p.Entries, ProxyPoolEntry{Name: name, URL: url})
+		}
+	}
+	p.KeepEntries = nil
 }
 
 // normalize 校验并规整代理池配置。

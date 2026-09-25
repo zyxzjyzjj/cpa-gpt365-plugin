@@ -208,6 +208,89 @@ func TestDescribePoolHidesCredentials(t *testing.T) {
 
 // ---- 会话粘性 ---------------------------------------------------------------
 
+// TestMergeKeepEntriesRestoresOriginalURL 地址留空的条目必须沿用原地址。
+//
+// 页面上已有条目的口令不会回传，编辑时地址框留空表示「保持不变」。
+// 若这里不还原，保存一次就会把出口地址清空，代理池静默失效。
+func TestMergeKeepEntriesRestoresOriginalURL(t *testing.T) {
+	previous := []ProxyPoolEntry{
+		{Name: "jp-1", URL: "http://user:secret@jp1.example.com:10000"},
+		{Name: "jp-2", URL: "http://user:secret@jp2.example.com:10000"},
+	}
+	next := ProxyPoolConfig{
+		Enabled: true,
+		// 页面只回传名称，地址为空。
+		Entries:     []ProxyPoolEntry{{Name: "jp-1", URL: ""}},
+		KeepEntries: []string{"jp-1", "jp-2"},
+	}
+	next.mergeKeepEntries(previous)
+	if err := next.normalize(); err != nil {
+		t.Fatalf("校验失败: %v", err)
+	}
+	if len(next.Entries) != 2 {
+		t.Fatalf("条目数 = %d，期望 2（应保留未出现在页面上的条目）", len(next.Entries))
+	}
+	byName := map[string]string{}
+	for _, entry := range next.Entries {
+		byName[entry.Name] = entry.URL
+	}
+	if byName["jp-1"] != "http://user:secret@jp1.example.com:10000" {
+		t.Errorf("jp-1 地址未还原: %q", byName["jp-1"])
+	}
+	if byName["jp-2"] != "http://user:secret@jp2.example.com:10000" {
+		t.Errorf("jp-2 地址未还原: %q", byName["jp-2"])
+	}
+	// 辅助字段必须被清空，不能留在生效配置里。
+	if len(next.KeepEntries) != 0 {
+		t.Errorf("KeepEntries 应被清空: %v", next.KeepEntries)
+	}
+}
+
+// TestMergeKeepEntriesAllowsRealUpdate 显式填写的地址必须覆盖原值。
+func TestMergeKeepEntriesAllowsRealUpdate(t *testing.T) {
+	previous := []ProxyPoolEntry{{Name: "jp-1", URL: "http://old.example.com:10000"}}
+	next := ProxyPoolConfig{
+		Enabled:     true,
+		Entries:     []ProxyPoolEntry{{Name: "jp-1", URL: "http://new.example.com:20000"}},
+		KeepEntries: []string{"jp-1"},
+	}
+	next.mergeKeepEntries(previous)
+	if next.Entries[0].URL != "http://new.example.com:20000" {
+		t.Errorf("显式地址应覆盖原值，实际 %q", next.Entries[0].URL)
+	}
+}
+
+// TestMergeKeepEntriesWithoutPrevious 无历史配置时不应凭空造出条目。
+func TestMergeKeepEntriesWithoutPrevious(t *testing.T) {
+	next := ProxyPoolConfig{
+		Enabled:     true,
+		KeepEntries: []string{"ghost"},
+	}
+	next.mergeKeepEntries(nil)
+	if len(next.Entries) != 0 {
+		t.Errorf("不应还原不存在的条目: %v", next.Entries)
+	}
+}
+
+// TestDescribeProxyURLHidesCredentials 池状态只暴露主机名，不回传口令。
+func TestDescribeProxyURLHidesCredentials(t *testing.T) {
+	host, hasCreds := describeProxyURL("http://user:SuperSecret@jp.example.com:10000")
+	if host != "jp.example.com:10000" {
+		t.Errorf("host = %q", host)
+	}
+	if !hasCreds {
+		t.Error("应识别出该地址带凭据")
+	}
+	if strings.Contains(host, "SuperSecret") {
+		t.Errorf("主机名中不得含口令: %q", host)
+	}
+
+	plainHost, plainCreds := describeProxyURL("http://jp2.example.com:10000")
+	if plainHost != "jp2.example.com:10000" || plainCreds {
+		t.Errorf("无凭据地址解析错误: %q %v", plainHost, plainCreds)
+	}
+}
+
 // TestSessionBinderSticksAndExpires 绑定在 TTL 内有效，过期后失效。
 func TestSessionBinderSticksAndExpires(t *testing.T) {
 	binder := newSessionBinder()

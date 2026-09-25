@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version 是插件版本。
-	Version = "0.3.3"
+	Version = "0.3.4"
 
 	// Provider 是执行器标识与模型归属标识，必须为小写。
 	Provider = "gpt365"
@@ -33,9 +33,16 @@ const (
 
 	DefaultResponsesURL = "https://bps.openai.com/basispoints/api/responses"
 
-	// 默认上游模型。该值按实测可用性选取：免费档账号请求该名称可稳定
-	// 返回结果，而其他名称会因账号无权限被上游拒绝。不同账号的可用模型
-	// 集合不同，因此这里只是合理默认值，可随时在配置中覆盖。
+	// 默认注册的模型别名。
+	//
+	// 实测结论（同一插件、不同账号）：
+	//   - 上游接受任意模型名，但按账号权限路由到实际可用的模型。
+	//     免费档回显 gpt-5.6-luna，Plus 档回显 gpt-5.6-sol。
+	//   - 也就是说「请求名」与「实际模型」不是一回事，列表里只给一个名字
+	//     会让用户以为账号只有那一个模型。
+	//
+	// 因此默认注册一组常见别名，覆盖两种档位的实际路由结果；
+	// 请求任一个都会由上游按账号权限落到真正可用的模型上。
 	DefaultUpstreamModel = "gpt-5.6-luna"
 	DefaultModelID       = "gpt-5.6-luna-basispoints"
 
@@ -51,6 +58,18 @@ const (
 	defaultTimeoutSeconds   = 300
 	defaultMaxResponseBytes = 64 << 20
 )
+
+// defaultModelAliases 是开箱即用的别名集合（含默认那个）。
+//
+// 实测结论（同一插件、不同账号）：上游接受任意模型名，但按账号权限路由到
+// 实际可用的模型——免费档回显 gpt-5.6-luna，Plus 档回显 gpt-5.6-sol。
+// 也就是说「请求名」与「实际模型」不是一回事，列表里只给一个名字会让用户
+// 以为账号只有那一个模型。因此默认注册一组常见别名。
+var defaultModelAliases = []string{
+	"gpt-5.6-luna-basispoints",
+	"gpt-5.6-sol-basispoints",
+	"gpt-6-basispoints",
+}
 
 // supportedReasoningEfforts 是上游真正接受的思考挡位。
 // 上游没有 max 挡位，因此 max/x-high 一律归一化为 xhigh。
@@ -176,8 +195,8 @@ func defaultConfig() Config {
 		DataDir:          "",
 		ResponsesURL:     DefaultResponsesURL,
 		UpstreamModel:    DefaultUpstreamModel,
-		Models:           []string{DefaultModelID},
-		ModelMappings:    map[string]string{DefaultModelID: DefaultUpstreamModel},
+		Models:           append([]string(nil), defaultModelAliases...),
+		ModelMappings:    defaultModelMappings(),
 		TimeoutSeconds:   defaultTimeoutSeconds,
 		MaxResponseBytes: defaultMaxResponseBytes,
 		AuthMode:         "chatgpt",
@@ -192,6 +211,19 @@ func defaultConfig() Config {
 			MaxEntries: 4096,
 		},
 	}
+}
+
+// defaultModelMappings 把每个默认别名映射到对应的上游模型名。
+//
+// 上游会按账号权限重新路由，因此这里的映射只是「请求时用的名字」；
+// 具体落到哪个模型由账号决定（免费档 luna，Plus 档 sol）。
+func defaultModelMappings() map[string]string {
+	mappings := make(map[string]string, len(defaultModelAliases))
+	for _, alias := range defaultModelAliases {
+		// 去掉 -basispoints 后缀即上游模型名。
+		mappings[alias] = strings.TrimSuffix(alias, "-basispoints")
+	}
+	return mappings
 }
 
 func (c *Config) normalize() error {

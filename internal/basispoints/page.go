@@ -365,6 +365,12 @@ eyJhbGciOiJSUzI1NiIs…
 (function () {
   "use strict";
 
+  // API 基址。
+  //
+  // 用绝对路径（以 / 开头）而不是相对路径：资源页挂在
+  // /v0/resource/plugins/gpt365/panel 下，若用相对路径，浏览器会以当前
+  // 目录为基准解析，在带尾斜杠或子路径的部署下会打到错误地址，表现为
+  // 请求根本发不出去（Failed to fetch）。
   var API = "/v0/management/plugins/gpt365";
   var state = { auths: [] };
 
@@ -417,18 +423,52 @@ eyJhbGciOiJSUzI1NiIs…
   }
 
   // embeddedKey 读取同源管理面板保存的密钥。
+  //
+  // CPA 面板把状态存在 localStorage 的 cli-proxy-auth 键下。不同版本字段名
+  // 略有差异，因此按已知名依次尝试，再退化为扫描所有字符串字段。
   function embeddedKey() {
     var raw;
     try { raw = window.localStorage.getItem(PANEL_STORE); } catch (e) { return null; }
     if (!raw) return null;
-    try {
-      var parsed = JSON.parse(deobfuscate(raw));
-      var state = (parsed && parsed.state) || parsed || {};
-      if (typeof state.managementKey === "string" && state.managementKey) return state.managementKey;
-      if (typeof state.key === "string" && state.key) return state.key;
-    } catch (e) { /* 不是 JSON 时按裸值处理 */ }
+
+    var parsed = null;
+    try { parsed = JSON.parse(deobfuscate(raw)); } catch (e) { parsed = null; }
+
+    if (parsed && typeof parsed === "object") {
+      var found = findKeyDeep(parsed, 0);
+      if (found) return found;
+    }
+    // 不是 JSON 时按裸值处理。
     var trimmed = String(raw).trim();
-    return trimmed && trimmed.charAt(0) !== "{" ? trimmed : null;
+    if (trimmed && trimmed.charAt(0) !== "{" && trimmed.charAt(0) !== "[") return trimmed;
+    return null;
+  }
+
+  // findKeyDeep 在对象里查找形似管理密钥的字符串字段。
+  //
+  // 已知字段名优先；都没有时扫描一层，取长度足够的字符串值。
+  // 限制深度与遍历量，避免在异常数据上卡住。
+  function findKeyDeep(node, depth) {
+    if (!node || typeof node !== "object" || depth > 4) return null;
+    var known = ["managementKey", "management_key", "key", "apiKey", "api_key", "secretKey", "secret_key"];
+    for (var i = 0; i < known.length; i++) {
+      var v = node[known[i]];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    var keys = Object.keys(node);
+    for (var j = 0; j < keys.length && j < 40; j++) {
+      var child = node[keys[j]];
+      if (child && typeof child === "object") {
+        var nested = findKeyDeep(child, depth + 1);
+        if (nested) return nested;
+      }
+    }
+    // 最后兜底：扫描一层字符串值。
+    for (var k = 0; k < keys.length && k < 40; k++) {
+      var value = node[keys[k]];
+      if (typeof value === "string" && value.trim().length >= 12) return value.trim();
+    }
+    return null;
   }
 
   // urlKey 读取 ?key= 参数，并立即从地址栏移除以免留在浏览历史里。
@@ -463,23 +503,57 @@ eyJhbGciOiJSUzI1NiIs…
     return h;
   }
 
-  function api(path, options) {
+  // request 是统一的请求封装，把三类失败区分开：
+  //
+  //   1. fetch 本身抛异常（Failed to fetch）—— 请求没发出去
+  //   2. HTTP 4xx/5xx                      —— 请求到了，被拒绝
+  //   3. 响应不是合法 JSON                  —— 到了但不是预期接口
+  //
+  // 三者原因完全不同，混在一起会让人无从下手。这里分别给出可操作的提示。
+  function request(path, options) {
     options = options || {};
     options.headers = headers();
-    return fetch(API + path, options).then(function (resp) {
+    return fetch(path, options).then(function (resp) {
       return resp.text().then(function (text) {
         var data = null;
-        try { data = text ? JSON.parse(text) : null; } catch (e) { data = { raw: text }; }
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+
         if (!resp.ok) {
-          var msg = (data && (data.message || data.error || data.raw)) || ("HTTP " + resp.status);
-          if (resp.status === 401 || resp.status === 403) {
-            msg = "管理密钥无效或未填写。请在页面上方填入 CPA 的管理密钥。";
+          if (resp.status === 401) {
+            throw new Error("管理密钥无效或未填写。请在页面上方填入 CPA 的管理密钥。");
           }
+          if (resp.status === 403) {
+            throw new Error("管理密钥被拒绝（403）。请确认填入的是管理密钥，" +
+              "而不是客户端 API Key。");
+          }
+          if (resp.status === 404) {
+            throw new Error("接口不存在（404）。可能是 CPA 版本不支持该管理端点，" +
+              "或插件未正确加载。");
+          }
+          var msg = (data && (data.message || data.error)) ||
+            (text ? text.slice(0, 300) : ("HTTP " + resp.status));
           throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+        }
+        if (text && data === null) {
+          throw new Error("响应不是合法 JSON。请确认请求命中的是 CPA 管理接口。");
         }
         return data;
       });
+    }).catch(function (err) {
+      // fetch 在网络层失败时抛 TypeError，消息通常是 "Failed to fetch"。
+      if (err instanceof TypeError || /Failed to fetch|NetworkError|load failed/i.test(err.message || "")) {
+        throw new Error("请求无法发出（网络层失败）。请检查：" +
+          "① 页面是否与 CPA 同源（同一地址与端口）；" +
+          "② CPA 是否仍在运行；" +
+          "③ 是否有反向代理或浏览器插件拦截了该请求。");
+      }
+      throw err;
     });
+  }
+
+  // api 走插件自己的管理路由。
+  function api(path, options) {
+    return request(API + path, options);
   }
 
   function el(id) { return document.getElementById(id); }
@@ -615,21 +689,10 @@ eyJhbGciOiJSUzI1NiIs…
     el("pool-state").textContent = "";
 
     // 保存到宿主的插件配置：由宿主写盘并触发热重载。
-    fetch("/v0/management/plugins/gpt365/config", {
+    // 用统一封装以获得可区分的错误提示（网络层 / 401 / 403 / 404）。
+    request("/v0/management/plugins/gpt365/config", {
       method: "PATCH",
-      headers: headers(),
       body: JSON.stringify(payload)
-    }).then(function (resp) {
-      return resp.text().then(function (text) {
-        if (!resp.ok) {
-          var msg = text || ("HTTP " + resp.status);
-          if (resp.status === 401 || resp.status === 403) {
-            msg = "管理密钥无效或未填写";
-          }
-          throw new Error(msg);
-        }
-        return text;
-      });
     }).then(function () {
       showPoolLog([{ ok: true, text: "已保存，宿主已重新加载插件配置" }]);
       el("pool-state").textContent = "已保存";

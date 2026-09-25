@@ -25,7 +25,11 @@ const (
 	routeAuthDelete = "/plugins/gpt365/delete"
 
 	// 浏览器资源页路由（相对 /v0/resource/plugins/gpt365/）。
-	resourceRoot = "/"
+	//
+	// 必须是具体的非空路径段，不能是 "/"：宿主 normalizeResourceRoute 会先做
+	// strings.TrimRight(path, "/")，把 "/" 裁成空串后判为无效并静默丢弃，
+	// 页面将永远不会被注册。这里与 codearts 插件一样使用 "/panel"。
+	resourcePanel = "/panel"
 )
 
 // managementRegistration 声明插件拥有的管理路由与资源页。
@@ -38,7 +42,7 @@ func managementRegistration() map[string]any {
 		},
 		"Resources": []map[string]any{
 			{
-				"Path":        resourceRoot,
+				"Path":        resourcePanel,
 				"Menu":        "GPT365 凭据",
 				"Description": "批量导入与查看 Basis Points 访问令牌。",
 			},

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -153,8 +154,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 4) 页面能否真正返回 HTML
-	pagePath := "/v0/resource/plugins/gpt365" + reg.Resources[0].Path
+	// 关键：照搬宿主的路径规范化，验证每条资源路由是否真的会被注册。
+	// 宿主 normalizeResourceRoute 会先 strings.TrimRight(path, "/")，
+	// 把 "/" 裁成空串后判为无效并静默丢弃 —— 只在这里检查才能抓到该问题。
+	accepted := 0
+	for _, resource := range reg.Resources {
+		normalized, ok := normalizeResourceRoute("gpt365", resource.Path)
+		if !ok {
+			fmt.Printf("✗ 资源路由 %q 会被宿主丢弃（规范化后为空或非法）\n", resource.Path)
+			continue
+		}
+		accepted++
+		fmt.Printf("    ✓ 宿主接受: %s\n", normalized)
+	}
+	if accepted == 0 {
+		fmt.Println("✗ 没有任何资源路由能通过宿主规范化，页面不会出现")
+		os.Exit(1)
+	}
+
+	// 页面必须能通过宿主实际使用的完整路径访问。
+	pagePath := ""
+	for _, resource := range reg.Resources {
+		if normalized, ok := normalizeResourceRoute("gpt365", resource.Path); ok {
+			pagePath = normalized
+			break
+		}
+	}
 	pageRaw, errPage := callPlugin("management.handle", mustJSON(map[string]any{
 		"Method": "GET", "Path": pagePath,
 	}))
@@ -178,13 +203,22 @@ func main() {
 	}
 	// 页面必须真的能导入。页面把 API 基址与子路径拼接使用，
 	// 因此这里分别校验基址与子路径都出现，再校验拼接结果可用。
-	for _, marker := range []string{"导入令牌", "已有凭据", "/v0/management/plugins/gpt365", `api("/import"`} {
+	for _, marker := range []string{
+		"导入令牌",
+		"已有凭据",
+		"/v0/management/plugins/gpt365",
+		`api("/import"`,
+		// 管理密钥必须能手动输入，否则自动读取失败时页面无法使用。
+		`id="mgmt-key"`,
+		// 固定键名读取同源管理面板的密钥（CPA 面板实际使用的键）。
+		`"cli-proxy-auth"`,
+	} {
 		if !contains(html, marker) {
 			fmt.Printf("✗ 页面缺少关键元素: %s\n", marker)
 			os.Exit(1)
 		}
 	}
-	fmt.Println("✓ 页面包含导入入口与管理接口调用")
+	fmt.Println("✓ 页面包含导入入口、密钥输入框与管理接口调用")
 
 	// 5) 导入接口：先用结构合法的 JWT 走通导入路径，
 	// 再用一个非法输入确认它被明确拒绝而不是静默成功。
@@ -298,6 +332,43 @@ func handleHostCall(method, body string) []byte {
 	default:
 		return []byte(`{"ok":true,"result":{}}`)
 	}
+}
+
+// normalizeResourceRoute 是宿主 internal/pluginhost/management.go 中
+// normalizeResourceRoute 的等价实现，用于在本地判断一条资源路由是否会被
+// 宿主接受。宿主会静默丢弃不合法的路由，因此必须在这里显式复现其规则，
+// 否则「注册成功」的假象会一直存在。
+func normalizeResourceRoute(pluginID, rawPath string) (string, bool) {
+	const resourcePluginBasePath = "/v0/resource/plugins"
+
+	if strings.TrimSpace(pluginID) == "" {
+		return "", false
+	}
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	pluginBasePath := resourcePluginBasePath + "/" + pluginID
+	if strings.HasPrefix(path, pluginBasePath+"/") {
+		path = strings.TrimPrefix(path, pluginBasePath)
+	}
+	// 宿主的关键动作：裁掉尾部斜杠后，空路径判为无效。
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return "", false
+	}
+	fullPath := pluginBasePath + path
+	if !strings.HasPrefix(fullPath, pluginBasePath+"/") {
+		return "", false
+	}
+	if strings.ContainsAny(fullPath, " \t\r\n") || strings.Contains(fullPath, ":") ||
+		strings.Contains(fullPath, "*") || strings.Contains(fullPath, "..") {
+		return "", false
+	}
+	return fullPath, true
 }
 
 // managementRequest 按 CPA 契约构造管理请求。

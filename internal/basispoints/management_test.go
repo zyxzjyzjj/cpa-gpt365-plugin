@@ -155,8 +155,48 @@ func TestManagementRegistrationDeclaresRoutes(t *testing.T) {
 	if len(resources) == 0 {
 		t.Fatal("应声明资源页")
 	}
-	if stringValue(resources[0]["Path"]) != resourceRoot {
-		t.Errorf("资源页路径 = %q", stringValue(resources[0]["Path"]))
+	// 资源页路径必须是具体的非空路径段。
+	//
+	// 宿主 normalizeResourceRoute 会先做 strings.TrimRight(path, "/")，
+	// 因此注册成 "/" 会被裁成空串并判为无效、静默丢弃，页面永远不会出现。
+	panelPath := stringValue(resources[0]["Path"])
+	if panelPath == "" || strings.Trim(panelPath, "/") == "" {
+		t.Errorf("资源页路径 %q 会被宿主丢弃：规范化后为空", panelPath)
+	}
+	if panelPath != resourcePanel {
+		t.Errorf("资源页路径 = %q，期望 %q", panelPath, resourcePanel)
+	}
+}
+
+// TestResourcePathSurvivesHostNormalization 锁定一个曾经真实存在的缺陷。
+//
+// 宿主 internal/pluginhost/management.go 的 normalizeResourceRoute 会执行
+// strings.TrimRight(path, "/") 并在结果为空时返回无效。插件曾把资源页注册为
+// "/"，于是被静默丢弃，页面上线后一直 404。这里复现宿主规则以防回归。
+func TestResourcePathSurvivesHostNormalization(t *testing.T) {
+	registration := managementRegistration()
+	resources, _ := registration["Resources"].([]map[string]any)
+	if len(resources) == 0 {
+		t.Fatal("应声明资源页")
+	}
+	for _, resource := range resources {
+		path := stringValue(resource["Path"])
+		if path == "" {
+			t.Errorf("资源页路径不能为空")
+			continue
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		// 宿主的规范化：裁掉尾部斜杠，空则无效。
+		trimmed := strings.TrimRight(path, "/")
+		if trimmed == "" {
+			t.Errorf("资源页路径 %q 经宿主 TrimRight 后为空，会被静默丢弃", stringValue(resource["Path"]))
+		}
+		full := "/v0/resource/plugins/gpt365" + trimmed
+		if strings.Contains(full, "..") || strings.ContainsAny(full, " \t") {
+			t.Errorf("资源页完整路径非法: %q", full)
+		}
 	}
 }
 
@@ -165,7 +205,7 @@ func TestManagementHandleServesPage(t *testing.T) {
 	service := NewService()
 	request, _ := json.Marshal(map[string]any{
 		"Method": "GET",
-		"Path":   "/v0/resource/plugins/gpt365/",
+		"Path":   "/v0/resource/plugins/gpt365/panel",
 	})
 	result, err := service.Handle("management.handle", request)
 	if err != nil {

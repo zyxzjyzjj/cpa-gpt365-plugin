@@ -80,6 +80,18 @@ const authPageHTML = `<!DOCTYPE html>
   }
   textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
 
+  input[type="password"] {
+    width: 100%;
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+    background: #fcfcfb;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+  }
+  input[type="password"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+
   .row { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
   button {
     font: inherit;
@@ -180,8 +192,22 @@ const authPageHTML = `<!DOCTYPE html>
   </header>
 
   <div class="banner" id="key-banner" style="display:none">
-    未找到管理密钥。请在 CPA 管理界面中打开本页面，或先登录管理后台。
+    <strong>需要管理密钥。</strong>在下方填入 CPA 的管理密钥后即可导入。
+    也可以从管理界面跳转时带上 <code>?key=</code> 参数自动填入。
   </div>
+
+  <section id="key-section">
+    <h2>管理密钥</h2>
+    <p class="hint">
+      用于调用 CPA 的管理接口。若从 CPA 管理界面打开本页，通常会自动读取；
+      读取不到时在此填写，只保存在当前标签页。
+    </p>
+    <input type="password" id="mgmt-key" placeholder="管理密钥" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button class="ghost" id="btn-key">保存并测试</button>
+      <span class="note" id="key-state"></span>
+    </div>
+  </section>
 
   <section>
     <h2>导入令牌</h2>
@@ -220,34 +246,100 @@ eyJhbGciOiJSUzI1NiIs…
   "use strict";
 
   var API = "/v0/management/plugins/gpt365";
-  var state = { auths: [], key: null };
+  var state = { auths: [] };
 
-  function findKey() {
-    // 同源部署下管理页把密钥存在 localStorage；键名在不同版本间有差异，
-    // 因此逐个尝试常见键，任一命中即可。
-    var names = ["management_key", "managementKey", "cpa_management_key", "management-key", "key", "apiKey"];
-    for (var i = 0; i < names.length; i++) {
-      try {
-        var v = localStorage.getItem(names[i]);
-        if (v && v.trim()) return v.trim();
-      } catch (e) { /* 隐私模式等场景忽略 */ }
-    }
-    // 回退：扫描所有键，取形似密钥的值。
+  // ---- 管理密钥获取 ----------------------------------------------------------
+  //
+  // 资源页本身不做鉴权，所有敏感操作都走 /v0/management/... 并需要管理密钥。
+  // 密钥按以下顺序获取，与 codearts 插件保持一致的做法：
+  //   1. 用户在本页输入框手动填写（存 sessionStorage，仅当前标签页）
+  //   2. URL 上的 ?key= 参数（读取后立即从地址栏抹掉）
+  //   3. 同源管理面板写入 localStorage 的 "cli-proxy-auth"
+  //   4. 本标签页 sessionStorage 里的历史值
+  //
+  // CPA 管理面板把状态存在 localStorage 的 cli-proxy-auth 键下，值是 JSON
+  // （形如 {"state":{"managementKey":"..."}}），部分版本还会加 enc::v1:: 前缀
+  // 做异或混淆。只按固定键名读取，不猜键名。
+  var PANEL_STORE = "cli-proxy-auth";
+  var ENC_PREFIX = "enc::v1::";
+  var SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+  var SS_KEY = "gpt365-mgmt-key";
+
+  function encBytes(text) { return new TextEncoder().encode(text); }
+
+  function xorBytes(data, key) {
+    var out = new Uint8Array(data.length);
+    for (var i = 0; i < data.length; i++) out[i] = data[i] ^ key[i % key.length];
+    return out;
+  }
+
+  function base64Bytes(text) {
+    var bin = window.atob(text);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function deobfuscate(value) {
+    if (!value || value.indexOf(ENC_PREFIX) !== 0) return value;
     try {
-      for (var j = 0; j < localStorage.length; j++) {
-        var k = localStorage.key(j);
-        if (k && /key|token/i.test(k)) {
-          var val = localStorage.getItem(k);
-          if (val && val.trim().length >= 8) return val.trim();
-        }
-      }
+      var key = encBytes(SECRET_SALT + "|" + window.location.host + "|" + window.navigator.userAgent);
+      return new TextDecoder().decode(xorBytes(base64Bytes(value.slice(ENC_PREFIX.length)), key));
+    } catch (e) { return value; }
+  }
+
+  function recall(key) {
+    try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function store(key, value) {
+    try { window.sessionStorage.setItem(key, value); } catch (e) {}
+  }
+
+  // embeddedKey 读取同源管理面板保存的密钥。
+  function embeddedKey() {
+    var raw;
+    try { raw = window.localStorage.getItem(PANEL_STORE); } catch (e) { return null; }
+    if (!raw) return null;
+    try {
+      var parsed = JSON.parse(deobfuscate(raw));
+      var state = (parsed && parsed.state) || parsed || {};
+      if (typeof state.managementKey === "string" && state.managementKey) return state.managementKey;
+      if (typeof state.key === "string" && state.key) return state.key;
+    } catch (e) { /* 不是 JSON 时按裸值处理 */ }
+    var trimmed = String(raw).trim();
+    return trimmed && trimmed.charAt(0) !== "{" ? trimmed : null;
+  }
+
+  // urlKey 读取 ?key= 参数，并立即从地址栏移除以免留在浏览历史里。
+  var initialURLKey = (function () {
+    var query = new URLSearchParams(window.location.search);
+    if (!query.has("key")) return null;
+    var value = (query.get("key") || "").trim();
+    query.delete("key");
+    var rest = query.toString();
+    try {
+      window.history.replaceState(null, "", window.location.pathname +
+        (rest ? "?" + rest : "") + window.location.hash);
     } catch (e) { /* 忽略 */ }
-    return null;
+    return value || null;
+  })();
+
+  function adminKey() {
+    var input = document.getElementById("mgmt-key");
+    var entered = input ? input.value.trim() : "";
+    if (entered) { store(SS_KEY, entered); return entered; }
+    if (initialURLKey) { store(SS_KEY, initialURLKey); return initialURLKey; }
+    var embedded = embeddedKey();
+    if (embedded) return embedded;
+    return recall(SS_KEY) || "";
   }
 
   function headers() {
     var h = { "Content-Type": "application/json" };
-    if (state.key) h["Authorization"] = "Bearer " + state.key;
+    var k = adminKey();
+    // 同时带上两种头：CPA 不同版本的鉴权中间件接受的名称不同。
+    if (k) { h["Authorization"] = "Bearer " + k; h["X-API-Key"] = k; }
     return h;
   }
 
@@ -260,6 +352,9 @@ eyJhbGciOiJSUzI1NiIs…
         try { data = text ? JSON.parse(text) : null; } catch (e) { data = { raw: text }; }
         if (!resp.ok) {
           var msg = (data && (data.message || data.error || data.raw)) || ("HTTP " + resp.status);
+          if (resp.status === 401 || resp.status === 403) {
+            msg = "管理密钥无效或未填写。请在页面上方填入 CPA 的管理密钥。";
+          }
           throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
         }
         return data;
@@ -382,8 +477,23 @@ eyJhbGciOiJSUzI1NiIs…
   }
 
   function init() {
-    state.key = findKey();
-    if (!state.key) el("key-banner").style.display = "block";
+    var keyInput = el("mgmt-key");
+    var auto = adminKey();
+    if (auto) keyInput.value = auto;
+    if (!auto) el("key-banner").style.display = "block";
+
+    el("btn-key").addEventListener("click", function () {
+      el("key-state").textContent = "检测中…";
+      load().then(function () {
+        el("key-state").textContent = "密钥可用";
+        el("key-banner").style.display = "none";
+      }).catch(function (err) {
+        el("key-state").textContent = err.message;
+      });
+    });
+    keyInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") el("btn-key").click();
+    });
 
     el("btn-import").addEventListener("click", doImport);
     el("btn-refresh").addEventListener("click", load);
@@ -395,7 +505,12 @@ eyJhbGciOiJSUzI1NiIs…
     });
     el("input").addEventListener("input", countLines);
     countLines();
-    load();
+    load().then(function () {
+      if (auto) {
+        el("key-state").textContent = "已自动读取密钥";
+        el("key-banner").style.display = "none";
+      }
+    });
   }
 
   if (document.readyState === "loading") {

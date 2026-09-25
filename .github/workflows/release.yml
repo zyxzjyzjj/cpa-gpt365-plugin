@@ -284,7 +284,7 @@ jobs:
       - name: Generate checksums
         working-directory: release-assets
         run: |
-          sha256sum ${PLUGIN_ID}_*.tar.gz ${PLUGIN_ID}_*.zip | sort > checksums.txt
+          sha256sum "${PLUGIN_ID}"_*.tar.gz "${PLUGIN_ID}"_*.zip | sort > checksums.txt
           cat checksums.txt
 
       - name: Extract version release notes

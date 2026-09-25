@@ -107,9 +107,15 @@ func main() {
 
 	management, _ := registration.Capabilities["management_api"].(bool)
 	authProvider, _ := registration.Capabilities["auth_provider"].(bool)
-	fmt.Printf("  capabilities: management_api=%v  auth_provider=%v\n", management, authProvider)
+	scheduler, _ := registration.Capabilities["scheduler"].(bool)
+	fmt.Printf("  capabilities: management_api=%v  auth_provider=%v  scheduler=%v\n",
+		management, authProvider, scheduler)
 	if !management {
 		fmt.Println("✗ management_api 未声明，页面不会被注册")
+		os.Exit(1)
+	}
+	if !scheduler {
+		fmt.Println("✗ scheduler 未声明，会话粘性不会生效")
 		os.Exit(1)
 	}
 
@@ -265,7 +271,26 @@ func main() {
 			map[string]any{"names": []string{"codex.json"}}))
 	fmt.Printf("✓ 删除接口（仅本插件文件） -> %s\n", truncate(decodeManagementBody(extractResult(guardRaw)), 160))
 
-	fmt.Println("\n全部验证通过：插件可注册、页面可打开、导入与列表接口可用")
+	// 8) 调度器：会话粘性的入口。未绑定时必须交给内置调度器（Handled=false），
+	//    不能无条件接管，否则会顶掉宿主自身的负载均衡。
+	schedRaw, errSched := callPlugin("scheduler.pick", mustJSON(map[string]any{
+		"Options": map[string]any{
+			"Headers": map[string][]string{"X-Session-Id": {"verify-session"}},
+		},
+		"Candidates": []map[string]any{{"ID": "auth-1", "Status": "active"}},
+	}))
+	if errSched != nil {
+		fmt.Printf("✗ scheduler.pick 调用失败: %v\n", errSched)
+		os.Exit(1)
+	}
+	schedResult := extractResult(schedRaw)
+	fmt.Printf("✓ scheduler.pick（未绑定） -> %s\n", truncate(schedResult, 120))
+	if !contains(schedResult, `"Handled":false`) {
+		fmt.Println("✗ 未绑定的会话应交给内置调度器")
+		os.Exit(1)
+	}
+
+	fmt.Println("\n全部验证通过：插件可注册、页面可打开、导入与列表接口可用、调度器已声明")
 }
 
 // decodeManagementBody 把管理响应信封里的 Body（base64）解成可读 JSON。

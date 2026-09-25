@@ -187,6 +187,8 @@ const authPageHTML = `<!DOCTYPE html>
     <ul class="stats">
       <li><span class="k">凭据</span><span class="v" id="stat-total">–</span></li>
       <li><span class="k">可用</span><span class="v" id="stat-active">–</span></li>
+      <li><span class="k">出口代理</span><span class="v" id="stat-pool">–</span></li>
+      <li><span class="k">粘性会话</span><span class="v" id="stat-sticky">–</span></li>
       <li><span class="k">上游模型</span><span class="v" id="stat-model" style="font-size:14px;font-family:var(--mono)">–</span></li>
     </ul>
   </header>
@@ -380,6 +382,24 @@ eyJhbGciOiJSUzI1NiIs…
     var active = auths.filter(function (a) { return !a.disabled && !a.expired; }).length;
     el("stat-active").textContent = active;
 
+    // 出口代理状态：显示池中条目数，未启用时说明共用全局链路。
+    var pool = state.pool || {};
+    if (pool.enabled) {
+      el("stat-pool").textContent = pool.count ? (pool.count + " 个") : "空池";
+      el("stat-pool").title = "策略 " + (pool.strategy || "hash") +
+        (pool.strict ? "（严格模式）" : "");
+    } else {
+      el("stat-pool").textContent = "共用";
+      el("stat-pool").title = "未启用代理池，所有账号共用全局代理链";
+    }
+
+    // 粘性会话：显示当前活跃绑定数。
+    var sticky = state.sticky || {};
+    el("stat-sticky").textContent = sticky.enabled ? (sticky.active || 0) + " 个" : "关闭";
+    el("stat-sticky").title = sticky.enabled
+      ? ("TTL " + (sticky.ttl_seconds || 0) + " 秒")
+      : "会话粘性已关闭，同一会话可能切换账号";
+
     if (!auths.length) {
       list.innerHTML = '<div class="empty"><strong>还没有导入任何凭据</strong>在上方粘贴令牌即可开始。</div>';
       return;
@@ -431,6 +451,8 @@ eyJhbGciOiJSUzI1NiIs…
   function load() {
     return api("/auths").then(function (data) {
       state.auths = (data && data.auths) || [];
+      state.pool = (data && data.proxy_pool) || {};
+      state.sticky = (data && data.sticky_session) || {};
       if (data && data.upstream) el("stat-model").textContent = data.upstream;
       render();
     }).catch(function (err) {

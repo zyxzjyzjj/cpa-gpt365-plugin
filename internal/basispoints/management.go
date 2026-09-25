@@ -207,6 +207,18 @@ func (s *Service) handleAuthList() (any, error) {
 			// 只暴露是否已配置，绝不回传口令。
 			"has_remote_credentials": cfg.ProxyChain.RemoteUsername != "" && cfg.ProxyChain.RemotePassword != "",
 		},
+		"proxy_pool": map[string]any{
+			"enabled":  cfg.ProxyPool.Enabled,
+			"strategy": cfg.ProxyPool.Strategy,
+			"strict":   cfg.ProxyPool.Strict,
+			"count":    len(cfg.ProxyPool.Entries),
+			"entries":  cfg.ProxyPool.describePool(),
+		},
+		"sticky_session": map[string]any{
+			"enabled":     cfg.StickySession.Enabled,
+			"ttl_seconds": cfg.StickySession.TTLSeconds,
+			"active":      s.sessions.count(),
+		},
 	}), nil
 }
 
@@ -286,6 +298,16 @@ func (s *Service) handleAuthImport(body []byte) (any, error) {
 			continue
 		}
 		seen[dedupeKey] = true
+
+		// 为该账号绑定出口代理并写入凭据，使分配在重启后依然有效。
+		if proxyURL := s.resolvePoolProxy(c.AccountID); proxyURL != "" {
+			authJSON, errBuild = bindProxyToAuthJSON(authJSON, proxyURL)
+			if errBuild != nil {
+				failed++
+				results = append(results, importResult{Name: fmt.Sprintf("#%d", index+1), Error: errBuild.Error()})
+				continue
+			}
+		}
 
 		name := authFileName(c, index)
 		var saved struct {

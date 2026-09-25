@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version 是插件版本。
-	Version = "0.2.2"
+	Version = "0.3.0"
 
 	// Provider 是执行器标识与模型归属标识，必须为小写。
 	Provider = "gpt365"
@@ -143,10 +143,32 @@ type Config struct {
 	AuthMode         string            `yaml:"auth_mode" json:"auth_mode"`
 	ProxyChain       ProxyChainConfig  `yaml:"proxy_chain" json:"proxy_chain"`
 
+	// ProxyPool 为每个账号分配独立出口，降低多账号被关联风控的风险。
+	ProxyPool ProxyPoolConfig `yaml:"proxy_pool" json:"proxy_pool"`
+
 	// ModelSelection 控制上游的 model_selection 字段。
 	// 留空（默认）时不发送该字段，由上游按账号权限路由，兼容性最好。
 	// 仅当确认账号拥有全部配置模型的权限时才设为 "explicit"。
 	ModelSelection string `yaml:"model_selection" json:"model_selection"`
+
+	// StickySession 控制会话粘性：同一会话固定使用同一账号。
+	StickySession StickySessionConfig `yaml:"sticky_session" json:"sticky_session"`
+}
+
+// StickySessionConfig 描述会话粘性策略。
+//
+// 上游按 turn/task 组织多轮对话，若同一会话的不同轮次被分到不同账号，
+// 上游会看到割裂的上下文，既影响效果也更容易触发风控。
+type StickySessionConfig struct {
+	// Enabled 为真时，同一会话固定绑定一个账号。
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// TTLSeconds 是绑定的存活时间。超时后允许重新分配，避免长期占用
+	// 单一账号。默认 3600 秒。
+	TTLSeconds int `yaml:"ttl_seconds" json:"ttl_seconds"`
+
+	// MaxEntries 是绑定表容量上限，超出后淘汰最旧记录。
+	MaxEntries int `yaml:"max_entries" json:"max_entries"`
 }
 
 func defaultConfig() Config {
@@ -165,6 +187,11 @@ func defaultConfig() Config {
 			RemoteProxy:        DefaultRemoteProxy,
 			RemoteUsername:     DefaultRemoteUsername,
 			ConnectTimeoutSecs: DefaultConnectTimeout,
+		},
+		StickySession: StickySessionConfig{
+			Enabled:    true,
+			TTLSeconds: 3600,
+			MaxEntries: 4096,
 		},
 	}
 }
@@ -242,7 +269,30 @@ func (c *Config) normalize() error {
 	if errChain := c.ProxyChain.normalize(); errChain != nil {
 		return errChain
 	}
+	if errPool := c.ProxyPool.normalize(); errPool != nil {
+		return errPool
+	}
+	c.StickySession.normalize()
 	return nil
+}
+
+// normalize 为会话粘性补默认值。
+func (s *StickySessionConfig) normalize() {
+	if s == nil {
+		return
+	}
+	if s.TTLSeconds <= 0 {
+		s.TTLSeconds = 3600
+	}
+	if s.TTLSeconds > 86400*7 {
+		s.TTLSeconds = 86400 * 7
+	}
+	if s.MaxEntries <= 0 {
+		s.MaxEntries = 4096
+	}
+	if s.MaxEntries > 100000 {
+		s.MaxEntries = 100000
+	}
 }
 
 // isZero 判断代理链配置是否完全未被赋值。

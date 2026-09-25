@@ -39,6 +39,50 @@ CPA 会按运行平台下载 `gpt365_<version>_<goos>_<goarch>.zip`，并用同�
 
 CPA 必须是 CGO 构建（管理接口响应头会标明动态库插件支持）。
 
+## 代理池：每个账号一个出口
+
+多个账号共用一个出口 IP 时，上游很容易把它们关联起来并触发风控。启用代理池后，**每个账号固定分配一个出口**，且分配结果写进凭据，CPA 重启后依然有效。
+
+```yaml
+proxy_pool:
+  enabled: true
+  entries:
+    - name: "jp-1"
+      url: "http://USER-zone-custom-region-JP:password@global.example.com:10000"
+    - name: "jp-2"
+      url: "http://USER-zone-custom-region-JP2:password@global.example.com:10000"
+  strategy: hash    # hash（默认）按账号稳定散列；sticky 按导入顺序
+  strict: false     # 为真时无可用出口直接失败，不静默回退
+```
+
+与 `proxy_chain` 的分工：
+
+| 配置 | 决定什么 |
+| --- | --- |
+| `proxy_chain` | **怎么连出去**：本机 → 本地代理 → 远程代理 |
+| `proxy_pool` | **用哪个远程代理**：每个账号分配池中一条 |
+
+账号代理**只替换远程段**，本地代理那一跳保持不变（否则本机无法到达远程代理）。账号代理自带凭据时，全局代理的用户名口令会被清空，避免把凭据发给别的出口。
+
+`strategy: hash` 用账号 ID 做稳定散列，条目顺序不影响结果 —— 同一账号永远拿到同一出口，账号增减也不会打乱既有分配。
+
+## 会话粘性：同一会话固定一个账号
+
+上游按会话组织多轮对话。若同一会话的不同轮次落到不同账号，上游会看到割裂的上下文，既影响效果，也因「同会话在不同账号/IP 间跳跃」更容易触发风控。
+
+```yaml
+sticky_session:
+  enabled: true
+  ttl_seconds: 3600   # 绑定存活时间
+  max_entries: 4096   # 绑定表容量，超出淘汰最旧
+```
+
+实现方式是通过 CPA 的 **scheduler 能力**参与选号：命中绑定则返回该账号，未命中则交给内置调度器（`Handled: false`），**不与宿主自身的负载均衡冲突**。
+
+会话键按以下顺序推导：请求元数据 → 请求头（`X-Session-Id`、`Session-Id`、`Conversation-Id`、`Prompt-Cache-Key` 等）→ 请求体中的 `prompt_cache_key` / `session_id`。**不使用消息内容做键** —— 内容随轮次变化，用它会让每轮都算新会话，粘性形同虚设。
+
+绑定的账号被删除或停用时，会自动回退到内置调度器，不会把请求钉死。
+
 ## 导入令牌
 
 插件有**独立的凭据提供者**（provider 标识 `gpt365`），不依赖 Codex 凭据。

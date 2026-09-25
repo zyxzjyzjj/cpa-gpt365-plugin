@@ -19,10 +19,20 @@ type Service struct {
 	cfg     Config
 	host    HostCall
 	stopped bool
+
+	// sessions 维护会话与账号的粘性绑定。
+	sessions *sessionBinder
+
+	// proxies 缓存账号到出口代理的分配结果。
+	proxies *proxyPool
 }
 
 func NewService() *Service {
-	return &Service{cfg: defaultConfig()}
+	return &Service{
+		cfg:      defaultConfig(),
+		sessions: newSessionBinder(),
+		proxies:  newProxyPool(),
+	}
 }
 
 func (s *Service) SetHost(host HostCall) {
@@ -124,6 +134,12 @@ func (s *Service) Handle(method string, raw json.RawMessage) (any, error) {
 	case "model.register", "model.static", "model.for_auth":
 		return modelRegistration(s.config()), nil
 
+	case "scheduler.identifier":
+		return map[string]any{"identifier": Provider}, nil
+
+	case "scheduler.pick":
+		return s.schedulerPick(raw)
+
 	case "response.intercept_after":
 		return s.interceptModelCatalog(raw)
 
@@ -186,6 +202,32 @@ func (s *Service) execute(raw json.RawMessage, stream bool) (any, error) {
 	body, errBody := prepareResponsesBody(source, cfg)
 	if errBody != nil {
 		return nil, errBody
+	}
+
+	// 解析本账号的出口代理，并把配置收敛为本次请求实际使用的链路。
+	//
+	// 优先级：凭据上绑定的代理 > 代理池按账号分配 > 全局 proxy_chain。
+	accountID := c.AccountID
+	if accountID == "" {
+		accountID = request.AuthID
+	}
+	accountProxy := proxyURLFromMetadata(request.AuthAttributes, request.AuthMetadata)
+	if accountProxy == "" {
+		accountProxy = s.resolvePoolProxy(accountID)
+	}
+	chain, errChain := effectiveProxyChain(cfg.ProxyChain, accountProxy)
+	if errChain != nil {
+		return nil, errChain
+	}
+	if cfg.ProxyPool.Enabled && cfg.ProxyPool.Strict && accountProxy == "" {
+		return nil, fail(400, "proxy_pool_empty",
+			"proxy_pool 已启用且 strict 为真，但该账号没有分配到出口代理")
+	}
+	cfg.ProxyChain = chain
+
+	// 记录会话粘性绑定：走到这里说明该账号就是本次实际使用的账号。
+	if sessionKey := sessionKeyFromExecutor(request); sessionKey != "" {
+		s.rememberSessionBinding(sessionKey, request.AuthID)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration(cfg))
@@ -271,6 +313,8 @@ func registration(cfg Config) map[string]any {
 			"executor_input_formats":  []string{"openai-response"},
 			"executor_output_formats": []string{"openai-response"},
 			"response_interceptor":    true,
+			// 调度器用于实现会话粘性：同一会话固定使用同一账号。
+			"scheduler": true,
 			// 开启管理接口，提供凭据批量导入与状态页面。
 			"management_api": true,
 		},

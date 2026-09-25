@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version 是插件版本。
-	Version = "0.3.1"
+	Version = "0.3.2"
 
 	// Provider 是执行器标识与模型归属标识，必须为小写。
 	Provider = "gpt365"

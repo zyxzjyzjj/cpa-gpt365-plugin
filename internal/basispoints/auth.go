@@ -244,9 +244,14 @@ func authData(raw []byte, fileName string, c credential) map[string]any {
 	if !c.ExpiresAt.IsZero() {
 		metadata["expires_at"] = c.ExpiresAt.UTC().Format(time.RFC3339)
 	}
+	// 刻意不设置 ID。
+	//
+	// 宿主的 pluginAuthDataToCoreAuth 在 ID 为空时会用「auth-dir 下的相对路径」
+	// 推导 auth.ID（见 authIDForPath），这正是凭据文件在运行时记录里的标识。
+	// 若这里自己编一个 ID（例如加前缀），ID 就会与 FileName 脱节：
+	// 模型按 auth.ID 注册，而管理接口按文件名查，账号的模型列表会显示为空。
 	return map[string]any{
 		"Provider":    Provider,
-		"ID":          credentialID(fileName),
 		"FileName":    fileName,
 		"Label":       label,
 		"StorageJSON": raw,

@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.3.2 — 2026-09-25（UTC）
+
+### 修复
+
+- **账号的模型列表为空。** `auth.parse` 返回的凭据记录自己编造了 ID（`bp-<文件名>`），而宿主的 `host.auth.save` 用 `authIDForPath` 按「相对 auth-dir 的路径」推导 ID。同一个凭据文件因此产生两个不同的 ID：模型按其中一个注册，管理接口按另一个查询，于是「查看模型列表」永远为空。
+
+  现改为**不设置 ID**，交由宿主统一推导，两条路径自然对齐。
+
+  这是从服务器日志与宿主源码定位的：日志中 `model registrar gpt365 failed: context deadline exceeded` 发生在插件重载时（宿主用被取消的 ctx 调用），而重注册列表 `[claude codex xai]` 里没有 gpt365；进一步核对 `sdk/cliproxy/service_executors.go:452`（按 auth.ID 注册）与 `internal/api/handlers/management/auth_files.go:207`（按 auth.ID 查询）后确认键不一致。
+
 ## v0.3.1 — 2026-09-25（UTC）
 
 ### 修复

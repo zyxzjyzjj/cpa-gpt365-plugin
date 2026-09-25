@@ -288,9 +288,12 @@ func (s *Service) handleAuthImport(body []byte) (any, error) {
 			Name string `json:"name"`
 			Path string `json:"path"`
 		}
+		// 注意：宿主契约里 json 字段是 json.RawMessage（原始 JSON 对象）。
+		// 若传 []byte，encoding/json 会把它编码成 base64 字符串，
+		// 宿主拿到字符串而非对象，解析必然失败。
 		errSave := s.call("host.auth.save", map[string]any{
 			"name": name,
-			"json": authJSON,
+			"json": json.RawMessage(authJSON),
 		}, &saved)
 		if errSave != nil {
 			failed++

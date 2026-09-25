@@ -122,39 +122,42 @@ plugins:
         max_entries: 4096
 
       # ---------------------------------------------------------------------
-      # 两级代理链（全局默认）
+      # 出网方式（默认直连，通常无需修改）
       # ---------------------------------------------------------------------
       #
-      # 本插件自行建立网络连接（不使用宿主的 HTTP 传输），因为本机访问
-      # 上游需要两级隧道：
+      # 默认直连上游，不需要任何代理配置。海外服务器、能直连 bps.openai.com
+      # 的环境保持默认即可。
       #
-      #   本进程 --CONNECT--> 本地代理 --CONNECT--> 远程轮换代理 --> 上游
+      # 只有确实需要经代理出网时才启用本项。插件自建连接而不走宿主的 HTTP
+      # 传输，是因为需要「在一条隧道内再发一次 CONNECT」的能力。
       #
-      # 宿主的 HTTP 传输只支持单一代理，无法在已建立的隧道内再发一次
-      # CONNECT，因此必须由插件自己实现。
+      # 三种可用形态：
       #
-      # 关闭本项后插件将直连上游（多数网络环境下会失败）。
+      #   1) 直连（默认）          什么都不用配
+      #   2) 经单个代理           只填 remote_proxy
+      #   3) 本地代理转远程代理    同时填 local_proxy 与 remote_proxy
+      #
+      # 两级隧道形态：
+      #   本进程 --CONNECT--> 本地代理 --CONNECT--> 远程代理 --> 上游
       proxy_chain:
-        enabled: true
+        # 默认关闭。填写任一地址后会自动视为启用。
+        enabled: false
 
-        # 第一跳：本机可达的本地代理。
-        # 远程轮换代理无法从本机直连，必须经此转发。
-        local_proxy: "http://127.0.0.1:15732"
+        # 第一跳：本机可达的代理。仅在需要经本机代理软件转发时才填。
+        # 例：http://127.0.0.1:7890
+        local_proxy: ""
 
-        # 第二跳：远程轮换代理。留空表示只使用本地代理单跳。
-        # 示例：http://your-rotating-proxy.example.com:10000
+        # 第二跳 / 唯一一跳：远程代理地址。
+        # 服务器直连远程代理时只填这一项即可。
+        # 例：http://user:pass@proxy.example.com:10000
         remote_proxy: ""
 
-        # 远程代理凭据。请勿把真实口令写进本文件。
-        #
-        # 推荐用环境变量注入（优先级高于本文件）：
-        #   GPT365_REMOTE_USERNAME
-        #   GPT365_REMOTE_PASSWORD
-        #   GPT365_REMOTE_PROXY
-        #   GPT365_LOCAL_PROXY
-        #   GPT365_RESPONSES_URL
-        #   GPT365_UPSTREAM_MODEL
+        # 远程代理凭据（也可直接写在 remote_proxy 的 URL 里）。
+        # 请勿把真实口令写进本文件，推荐用环境变量注入：
+        #   GPT365_REMOTE_USERNAME / GPT365_REMOTE_PASSWORD
+        #   GPT365_REMOTE_PROXY    / GPT365_LOCAL_PROXY
+        #   GPT365_RESPONSES_URL   / GPT365_UPSTREAM_MODEL
         remote_username: ""
 
-        # 建立隧道（含两跳 CONNECT）的超时秒数，范围 1~300。
+        # 建立隧道（含 CONNECT）的超时秒数，范围 1~300。
         connect_timeout_seconds: 20

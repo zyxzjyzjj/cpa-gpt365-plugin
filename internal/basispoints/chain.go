@@ -14,17 +14,21 @@ import (
 	"time"
 )
 
-// 本文件实现「本机 -> 本地代理 -> 远程轮换代理 -> 目标」的两级 HTTP 隧道。
+// 本文件实现可选的代理出网能力，支持三种形态：
 //
-// 为什么不使用宿主 host.http.do：宿主的 HTTP 传输只接受单一代理设置，
-// 而本机的远程轮换代理无法直连，必须先经本地代理（如 127.0.0.1:15732）
-// 转发。标准库的 http.ProxyURL 也只支持一跳，无法在已建立的隧道内再发一次
-// CONNECT，因此这里手写嵌套 CONNECT。
+//	直连（默认）        不配置任何代理
+//	单个代理            只配 local_proxy 或只配 remote_proxy
+//	两级隧道            同时配 local_proxy 与 remote_proxy
 //
-// 实测依据（同一台机器）：
-//   - 直连远程轮换代理：失败（连接被重置）。
-//   - 经本地代理嵌套 CONNECT：成功，且错误密码会被远程代理以 407 拒绝。
-//   - 连续请求出口 IP 不同，确认轮换生效。
+// 两级隧道形态用于「本机经本地代理软件出网，再由远程代理落地」的场景：
+//
+//	本进程 --CONNECT--> 本地代理 --CONNECT--> 远程代理 --> 目标
+//
+// 标准库的 http.ProxyURL 只支持一跳，无法在已建立的隧道内再发一次 CONNECT，
+// 因此这里手写嵌套 CONNECT。
+//
+// 默认直连是刻意的：插件不假设运行环境需要代理。把某台机器的调试端口写成
+// 默认值，会让能直连的服务器每个请求都打到一个不存在的本地端口上。
 
 const connectHandshakeTimeout = 30 * time.Second
 
@@ -106,9 +110,40 @@ func establishTunnel(raw net.Conn, proxyAddr, target, authHeader string, timeout
 	return raw, reader, nil
 }
 
-// dialThrough 建立一条到 target 的（可能两级）隧道连接。
+// dialThrough 建立一条到 target 的隧道连接。
+//
+// 支持三种形态：
+//
+//	只配 remoteAddr（服务器直连远程代理）—— 单跳，直接连远程代理
+//	只配 localAddr（本机经本地代理出网）—— 单跳，连本地代理
+//	两者都配（本机经本地代理再转远程代理）—— 两级嵌套 CONNECT
 func (d *chainDialer) dialThrough(ctx context.Context, target string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: d.connectTO, KeepAlive: 30 * time.Second}
+
+	// 没有本地跳：直接连远程代理，在它上面开隧道到目标。
+	if d.localAddr == "" {
+		if d.remoteAddr == "" {
+			return nil, fmt.Errorf("代理链未配置任何地址")
+		}
+		hop, errDial := dialer.DialContext(ctx, "tcp", d.remoteAddr)
+		if errDial != nil {
+			return nil, fmt.Errorf("连接远程代理 %s 失败: %w", d.remoteAddr, errDial)
+		}
+		if d.remoteIsTLS {
+			tlsHop, errTLS := d.wrapTLS(ctx, hop, d.remoteAddr)
+			if errTLS != nil {
+				hop.Close()
+				return nil, fmt.Errorf("远程代理 TLS 握手失败: %w", errTLS)
+			}
+			hop = tlsHop
+		}
+		conn, reader, errTunnel := establishTunnel(hop, d.remoteAddr, target, d.remoteAuth, d.connectTO)
+		if errTunnel != nil {
+			hop.Close()
+			return nil, errTunnel
+		}
+		return &bufferedConn{Conn: conn, reader: reader}, nil
+	}
 
 	// 第一跳：本机 -> 本地代理，隧道指向远程代理（或直接指向目标）。
 	firstTarget := target
@@ -214,24 +249,31 @@ func newHTTPClient(cfg Config, timeout time.Duration) (*http.Client, error) {
 }
 
 // newChainDialer 把配置解析成可用的拨号器。
+//
+// 本地代理与远程代理都可选，至少需要一个；两者都缺说明配置有误。
 func newChainDialer(cfg ProxyChainConfig) (*chainDialer, error) {
-	local, errLocal := parseProxyEndpoint(cfg.LocalProxy)
-	if errLocal != nil {
-		return nil, fail(400, "invalid_config", "本地代理地址无效: "+errLocal.Error())
-	}
 	timeout := time.Duration(cfg.ConnectTimeoutSecs) * time.Second
 	if timeout <= 0 {
 		timeout = DefaultConnectTimeout * time.Second
 	}
-	dialer := &chainDialer{
-		localAddr:  local.address,
-		localAuth:  local.auth,
-		localIsTLS: local.tls,
-		connectTO:  timeout,
+	dialer := &chainDialer{connectTO: timeout}
+
+	// 本地代理：仅在配置了地址时解析。
+	if strings.TrimSpace(cfg.LocalProxy) != "" {
+		local, errLocal := parseProxyEndpoint(cfg.LocalProxy)
+		if errLocal != nil {
+			return nil, fail(400, "invalid_config", "本地代理地址无效: "+errLocal.Error())
+		}
+		dialer.localAddr = local.address
+		dialer.localAuth = local.auth
+		dialer.localIsTLS = local.tls
 	}
 
+	// 远程代理：服务器场景常常只配这一项，直接连它即可。
 	if strings.TrimSpace(cfg.RemoteProxy) == "" {
-		// 只配置本地代理：单跳，本地代理自身的凭据在第一跳发送。
+		if dialer.localAddr == "" {
+			return nil, fail(400, "invalid_config", "代理链已启用但未提供任何代理地址")
+		}
 		return dialer, nil
 	}
 

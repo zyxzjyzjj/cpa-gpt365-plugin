@@ -105,8 +105,15 @@ func TestConfigNormalizeDefaults(t *testing.T) {
 	if len(cfg.Models) != 1 || cfg.Models[0] != DefaultModelID {
 		t.Errorf("models = %v", cfg.Models)
 	}
-	if cfg.ProxyChain.LocalProxy != DefaultLocalProxy {
-		t.Errorf("local_proxy = %q", cfg.ProxyChain.LocalProxy)
+	// 默认必须是直连：插件不假设运行环境需要代理。
+	// 曾经把某台机器的调试端口写成默认值，导致直连环境的每个请求都打到
+	// 一个不存在的端口上。
+	if cfg.ProxyChain.Enabled {
+		t.Error("默认不应启用代理链")
+	}
+	if cfg.ProxyChain.LocalProxy != "" || cfg.ProxyChain.RemoteProxy != "" {
+		t.Errorf("默认不应预置任何代理地址: local=%q remote=%q",
+			cfg.ProxyChain.LocalProxy, cfg.ProxyChain.RemoteProxy)
 	}
 }
 

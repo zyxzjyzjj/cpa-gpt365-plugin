@@ -242,21 +242,26 @@ const attrProxyURL = "proxy_url"
 
 // effectiveProxyChain 把账号级代理合并进全局代理链。
 //
-// 账号代理只替换远程段：本地代理那一跳必须保留，否则本机无法到达远程代理。
+// 规则：
+//   - 全局配了本地跳（local_proxy）时保留它：本机需要经它才能到达远程代理。
+//   - 全局是直连或只配了远程代理时，账号代理直接作为远程段使用。
+//   - 账号代理自带凭据时清空全局凭据，避免把凭据发给别的出口。
 func effectiveProxyChain(base ProxyChainConfig, accountProxyURL string) (ProxyChainConfig, error) {
 	accountProxyURL = strings.TrimSpace(accountProxyURL)
 	if accountProxyURL == "" {
 		return base, nil
 	}
+	if _, errParse := parseProxyEndpoint(accountProxyURL); errParse != nil {
+		return base, fail(400, "invalid_config", "账号代理地址无效: "+errParse.Error())
+	}
 	merged := base
+	// 指定了账号代理就必须走代理，否则会被当作直连。
+	merged.Enabled = true
 	merged.RemoteProxy = accountProxyURL
-	// 账号代理的凭据写在 URL 里时，清掉可能残留的全局用户名口令，
-	// 避免把全局凭据发给另一个出口。
-	if parsed, err := url.Parse(accountProxyURL); err == nil && parsed.User != nil {
+	// 账号代理的凭据写在 URL 里时，清掉可能残留的全局用户名口令。
+	if parsed, errParse := url.Parse(accountProxyURL); errParse == nil && parsed.User != nil {
 		merged.RemoteUsername = ""
 		merged.RemotePassword = ""
-	} else if err != nil {
-		return base, fail(400, "invalid_config", "账号代理地址无效: "+err.Error())
 	}
 	return merged, nil
 }

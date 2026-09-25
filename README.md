@@ -1,7 +1,7 @@
 # GPT365 Basis Points（CPA 原生插件）
 
 将 `bps.openai.com` 的 Basis Points Responses 接口接入 CLIProxyAPI（CPA），
-复用 CPA 中已有的 ChatGPT/Codex OAuth 凭据，并内置**两级代理链**支持。
+复用 CPA 中已有的 ChatGPT/Codex OAuth 凭据，默认直连上游，可选经代理出网。
 
 ## 通过 CPA 插件商店安装（推荐）
 
@@ -69,10 +69,10 @@ proxy_pool:
 
 | 配置 | 决定什么 |
 | --- | --- |
-| `proxy_chain` | **怎么连出去**：本机 → 本地代理 → 远程代理 |
-| `proxy_pool` | **用哪个远程代理**：每个账号分配池中一条 |
+| `proxy_chain` | **怎么连出去**：默认直连；也可经单个代理或两级隧道 |
+| `proxy_pool` | **用哪个代理**：每个账号分配池中一条 |
 
-账号代理**只替换远程段**，本地代理那一跳保持不变（否则本机无法到达远程代理）。账号代理自带凭据时，全局代理的用户名口令会被清空，避免把凭据发给别的出口。
+账号代理**只替换 `proxy_chain` 的远程段**。若配置了本地代理那一跳，它会保持不变（本机需经它才能到达远程代理）；若本身是直连或只配了远程代理，则直接采用账号代理。账号代理自带凭据时，全局代理的用户名口令会被清空，避免把凭据发给别的出口。
 
 `strategy: hash` 用账号 ID 做稳定散列，条目顺序不影响结果 —— 同一账号永远拿到同一出口，账号增减也不会打乱既有分配。
 
@@ -164,15 +164,27 @@ curl -X POST http://localhost:8317/v0/management/plugins/gpt365/import \
 | POST | `/v0/management/plugins/gpt365/import` | 批量导入 |
 | POST | `/v0/management/plugins/gpt365/delete` | 批量删除（`{"names":[...]}` 或 `{"all":true}`） |
 
-## 这个插件解决什么问题
+## 出网方式（默认直连）
 
-本机无法直连远程轮换代理，必须经本地代理转发；而 CPA 宿主的 HTTP 传输只支持
-单一代理，无法在已建立的隧道内再发一次 CONNECT。因此本插件自带拨号器，
-自行建立两级隧道：
+**默认直连上游，不需要任何代理配置。** 海外服务器、能直连 `bps.openai.com` 的环境保持默认即可。
+
+只有确实需要经代理出网时才配置 `proxy_chain`：
+
+| 形态 | 配置 |
+| --- | --- |
+| 直连（默认） | 什么都不用配 |
+| 经单个代理 | 只填 `remote_proxy` |
+| 本地代理转远程代理 | 同时填 `local_proxy` 与 `remote_proxy` |
+
+两级隧道形态：
 
 ```
-本进程 --CONNECT--> 本地代理(15732) --CONNECT--> 远程轮换代理 --> bps.openai.com
+本进程 --CONNECT--> 本地代理 --CONNECT--> 远程代理 --> bps.openai.com
 ```
+
+插件自建连接而不走宿主的 HTTP 传输，是因为需要「在一条已建立的隧道内再发一次 CONNECT」的能力，标准库的 `http.ProxyURL` 只支持一跳。
+
+填写任一地址会自动视为启用；启用但没有任何地址会在配置校验阶段直接报错，避免「以为在用代理，其实直连」——那会让出口 IP 与预期不符，账号更容易被关联风控。
 
 同时按 `run_officejs` 工具偷渡约定，把客户端的工具调用安全地转换成上游原生调用
 并回放，使 Codex 等客户端可以正常使用工具。
@@ -250,17 +262,25 @@ make build
 
 ### 代理链配置示例
 
+服务器直连远程代理（最常见）：
+
 ```yaml
 proxy_chain:
-  enabled: true
-  local_proxy: "http://127.0.0.1:15732"
-  remote_proxy: ""          # 建议由 GPT365_REMOTE_PROXY 提供
+  remote_proxy: "http://user:pass@proxy.example.com:10000"
+```
+
+本机经本地代理软件出网，再由远程代理落地：
+
+```yaml
+proxy_chain:
+  local_proxy: "http://127.0.0.1:7890"
+  remote_proxy: "http://proxy.example.com:10000"
   remote_username: ""       # 建议由 GPT365_REMOTE_USERNAME 提供
   remote_password: ""       # 建议由 GPT365_REMOTE_PASSWORD 提供
   connect_timeout_seconds: 20
 ```
 
-`remote_proxy` 留空则退化为只使用本地代理的单跳模式。
+不配置 `proxy_chain` 即直连上游。填写任一地址会自动视为启用。
 
 ## 协议边界
 

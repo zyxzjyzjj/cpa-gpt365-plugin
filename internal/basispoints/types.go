@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version 是插件版本。
-	Version = "0.3.2"
+	Version = "0.3.3"
 
 	// Provider 是执行器标识与模型归属标识，必须为小写。
 	Provider = "gpt365"
@@ -39,14 +39,14 @@ const (
 	DefaultUpstreamModel = "gpt-5.6-luna"
 	DefaultModelID       = "gpt-5.6-luna-basispoints"
 
-	// 默认两级代理链参数：本地代理负责把流量送出本机，
-	// 远程轮换代理再以目标地区出口访问上游。
+	// 代理相关默认值。
 	//
-	// 这里只提供地址骨架，不含任何凭据。远程代理的用户名与口令必须由使用者
-	// 在配置中提供：本仓库是公开的，把凭据写进源码等同于公开泄露。
-	DefaultLocalProxy       = "http://127.0.0.1:15732"
-	DefaultRemoteProxy      = ""
-	DefaultRemoteUsername   = ""
+	// 默认是「直连」：插件不假设运行环境需要代理。海外服务器、能直连上游的
+	// 网络都不需要任何代理配置。
+	//
+	// 只有确实需要经代理出网时，才在配置里显式开启 proxy_chain 并填写地址。
+	// 这里不预置任何本地地址——把某台机器的调试端口写成默认值，会让直连环境
+	// 的每个请求都打到一个不存在的端口上。
 	DefaultConnectTimeout   = 20
 	defaultTimeoutSeconds   = 300
 	defaultMaxResponseBytes = 64 << 20
@@ -181,11 +181,9 @@ func defaultConfig() Config {
 		TimeoutSeconds:   defaultTimeoutSeconds,
 		MaxResponseBytes: defaultMaxResponseBytes,
 		AuthMode:         "chatgpt",
+		// 默认直连上游，不配置任何代理。
 		ProxyChain: ProxyChainConfig{
-			Enabled:            true,
-			LocalProxy:         DefaultLocalProxy,
-			RemoteProxy:        DefaultRemoteProxy,
-			RemoteUsername:     DefaultRemoteUsername,
+			Enabled:            false,
 			ConnectTimeoutSecs: DefaultConnectTimeout,
 		},
 		StickySession: StickySessionConfig{
@@ -260,12 +258,8 @@ func (c *Config) normalize() error {
 
 	applyTopLevelEnvOverrides(c)
 
-	// 完全未提及代理链时套用默认值。此处用整体零值判定，是为了让直接构造的
-	// Config{}（例如空配置节点）也能得到可用的默认链路；而显式写出
-	// `enabled: false` 的配置不会落在零值分支上，仍能正确表达「关闭」。
-	if c.ProxyChain.isZero() {
-		c.ProxyChain = defaultConfig().ProxyChain
-	}
+	// 代理链默认关闭。只有显式写出 enabled: true（或提供了地址）才启用。
+	// 不在这里套用任何默认地址：直连环境不应被塞进一个它连不上的代理。
 	if errChain := c.ProxyChain.normalize(); errChain != nil {
 		return errChain
 	}
@@ -296,9 +290,6 @@ func (s *StickySessionConfig) normalize() {
 }
 
 // isZero 判断代理链配置是否完全未被赋值。
-//
-// 注意 Enabled 默认为 false，因此「只填了 local_proxy」这种最小配置
-// 不会被误判为零值。
 func (p ProxyChainConfig) isZero() bool {
 	return !p.Enabled &&
 		p.LocalProxy == "" &&
@@ -308,6 +299,17 @@ func (p ProxyChainConfig) isZero() bool {
 		p.ConnectTimeoutSecs == 0
 }
 
+// normalize 校验代理链配置。
+//
+// 支持的形态：
+//
+//	（不配置）            —— 直连上游，默认
+//	local_proxy 单填     —— 经本地代理出网（单跳）
+//	remote_proxy 单填    —— 直连远程代理（单跳，服务器常见）
+//	两者都填             —— 本地代理 -> 远程代理（两级隧道）
+//
+// 是否启用由 enabled 决定；写了地址但没写 enabled 时视为启用，
+// 避免「配了代理却不生效」这种静默失败。
 func (p *ProxyChainConfig) normalize() error {
 	if p == nil {
 		return nil
@@ -317,7 +319,17 @@ func (p *ProxyChainConfig) normalize() error {
 	p.RemoteUsername = strings.TrimSpace(p.RemoteUsername)
 	p.RemotePassword = strings.TrimSpace(p.RemotePassword)
 	applyProxyEnvOverrides(p)
+
+	// 提供了任一地址就视为要启用，避免配置被静默忽略。
+	if p.LocalProxy != "" || p.RemoteProxy != "" {
+		p.Enabled = true
+	}
 	if !p.Enabled {
+		// 直连：清掉可能残留的地址，避免半配置状态被误用。
+		p.LocalProxy = ""
+		p.RemoteProxy = ""
+		p.RemoteUsername = ""
+		p.RemotePassword = ""
 		return nil
 	}
 	if p.ConnectTimeoutSecs <= 0 {
@@ -326,14 +338,16 @@ func (p *ProxyChainConfig) normalize() error {
 	if p.ConnectTimeoutSecs > 300 {
 		return fail(400, "invalid_config", "proxy_chain.connect_timeout_seconds 不能超过 300")
 	}
-	if p.LocalProxy == "" {
-		return fail(400, "invalid_config", "proxy_chain.local_proxy 不能为空")
-	}
-	if errLocal := validateProxyURL(p.LocalProxy); errLocal != nil {
-		return fail(400, "invalid_config", "proxy_chain.local_proxy 无效: "+errLocal.Error())
+	if p.LocalProxy != "" {
+		if errLocal := validateProxyURL(p.LocalProxy); errLocal != nil {
+			return fail(400, "invalid_config", "proxy_chain.local_proxy 无效: "+errLocal.Error())
+		}
 	}
 	if p.RemoteProxy == "" {
-		// 只配置本地代理时退化为单跳，仍然是合法配置。
+		// 只有本地代理：单跳。
+		if p.LocalProxy == "" {
+			return fail(400, "invalid_config", "proxy_chain 已启用但未提供任何代理地址")
+		}
 		return nil
 	}
 	if errRemote := validateProxyURL(p.RemoteProxy); errRemote != nil {

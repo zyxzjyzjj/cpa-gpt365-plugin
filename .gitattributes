@@ -1,0 +1,10 @@
+# 统一以 LF 存储，避免 Windows 上的 CRLF 污染仓库。
+# CI 在 Linux 上执行 gofmt 与 actionlint，行尾不一致会导致无意义的 diff。
+* text=auto eol=lf
+
+# 二进制产物不参与行尾转换与 diff。
+*.dll binary
+*.so binary
+*.dylib binary
+*.zip binary
+*.tar.gz binary

@@ -1,0 +1,104 @@
+# GPT365 Basis Points 插件配置示例（CPA / CLIProxyAPI）
+#
+# 将本文件的 plugins 节点内容合并到 CPA 的 config.yaml。
+# 若已有 plugins 节点，请只合并其子项，不要重复添加同名节点或覆盖其他插件。
+#
+# 本文件不会被插件自动读取；CPA 会把 plugins.configs.gpt365 下的参数传给插件。
+#
+# 动态库文件名必须与插件 ID 一致：gpt365.dll / gpt365.so / gpt365.dylib
+#
+# 凭据处理原则：本仓库是公开的，因此示例中不含任何真实凭据。
+# 远程代理的用户名与口令请通过环境变量注入（见下方 proxy_chain 说明）。
+
+plugins:
+  # CPA 插件系统总开关；仅打开单个插件开关是不够的。
+  enabled: true
+  dir: "plugins"
+  configs:
+    gpt365:
+      enabled: true
+      # 启动与路由顺序，数值越大越先执行。
+      priority: 100
+
+      # ---------------------------------------------------------------------
+      # 上游接口
+      # ---------------------------------------------------------------------
+
+      # Basis Points Responses 接口地址，通常无需修改。
+      responses_url: https://bps.openai.com/basispoints/api/responses
+
+      # 未在 model_mappings 中单独配置的别名使用此上游模型。
+      #
+      # 注意：可用模型取决于账号权限，且上游会在无权限时返回
+      # 403 "Model access has changed" 或 429。默认值 gpt-5.6-luna
+      # 是实测可用的保守选择；如你的账号有其他权限，可自行替换。
+      upstream_model: gpt-5.6-luna
+
+      # 暴露给客户端的模型别名列表。
+      # 建议保留 -basispoints 后缀，避免与 CPA 原生 Codex 模型混淆。
+      models:
+        - gpt-5.6-luna-basispoints
+
+      # 别名到上游模型的映射。键必须已列入 models。
+      model_mappings:
+        gpt-5.6-luna-basispoints: gpt-5.6-luna
+
+      # 上游的 model_selection 字段，默认留空表示不发送。
+      #
+      # 实测：发送 "explicit" 会让上游按名称严格校验账号权限，账号没有该
+      # 模型权限时直接返回 403；"auto" 会被判定为非法值返回 422。
+      # 留空时上游按账号实际权限路由，兼容性最好。
+      model_selection: ""
+
+      # 读取上游响应的超时时间，单位秒，范围 10~1800。
+      timeout_seconds: 300
+
+      # 上游响应体大小上限，单位字节，范围 64 KiB ~ 128 MiB。
+      max_response_bytes: 67108864
+
+      # 认证模式，通常保持 chatgpt。
+      # 凭据来自 CPA 中已有的 ChatGPT/Codex OAuth 文件，
+      # 不要在此填写 access_token 或 refresh_token。
+      auth_mode: chatgpt
+
+      # 非敏感配置的持久化目录。留空表示只由本文件管理配置。
+      # 远程代理口令属于凭据，任何时候都不会写入该目录。
+      data_dir: ""
+
+      # ---------------------------------------------------------------------
+      # 两级代理链
+      # ---------------------------------------------------------------------
+      #
+      # 本插件自行建立网络连接（不使用宿主的 HTTP 传输），因为本机访问
+      # 上游需要两级隧道：
+      #
+      #   本进程 --CONNECT--> 本地代理 --CONNECT--> 远程轮换代理 --> 上游
+      #
+      # 宿主的 HTTP 传输只支持单一代理，无法在已建立的隧道内再发一次
+      # CONNECT，因此必须由插件自己实现。
+      #
+      # 关闭本项后插件将直连上游（多数网络环境下会失败）。
+      proxy_chain:
+        enabled: true
+
+        # 第一跳：本机可达的本地代理。
+        # 远程轮换代理无法从本机直连，必须经此转发。
+        local_proxy: "http://127.0.0.1:15732"
+
+        # 第二跳：远程轮换代理。留空表示只使用本地代理单跳。
+        # 示例：http://your-rotating-proxy.example.com:10000
+        remote_proxy: ""
+
+        # 远程代理凭据。请勿把真实口令写进本文件。
+        #
+        # 推荐用环境变量注入（优先级高于本文件）：
+        #   GPT365_REMOTE_USERNAME
+        #   GPT365_REMOTE_PASSWORD
+        #   GPT365_REMOTE_PROXY
+        #   GPT365_LOCAL_PROXY
+        #   GPT365_RESPONSES_URL
+        #   GPT365_UPSTREAM_MODEL
+        remote_username: ""
+
+        # 建立隧道（含两跳 CONNECT）的超时秒数，范围 1~300。
+        connect_timeout_seconds: 20

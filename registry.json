@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "gpt365",
+      "name": "GPT365 Basis Points",
+      "description": "通过两级代理链将 bps.openai.com 的 Responses 接口接入 CPA，复用已有的 ChatGPT/Codex OAuth 凭据，并提供客户端工具协议适配。",
+      "author": "zyxzjyzjj",
+      "repository": "https://github.com/zyxzjyzjj/cpa-gpt365-plugin",
+      "homepage": "https://github.com/zyxzjyzjj/cpa-gpt365-plugin",
+      "tags": [
+        "Provider",
+        "Codex",
+        "Responses",
+        "Basis Points",
+        "Proxy Chain"
+      ],
+      "install": {
+        "type": "github-release"
+      },
+      "license": "MIT"
+    }
+  ]
+}

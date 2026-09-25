@@ -1,0 +1,13 @@
+build/
+*.dll
+*.so
+*.dylib
+*.h
+*.exe
+*.test
+*.out
+
+# 本地凭据与运行产物
+*.token
+.env
+token.txt

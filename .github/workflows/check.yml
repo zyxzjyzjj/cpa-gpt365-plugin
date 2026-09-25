@@ -1,0 +1,78 @@
+name: Check
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: 需要检查的 Git 引用，默认使用触发本次运行的引用。
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: 用于核对插件版本的发布标签。
+        required: false
+        default: ""
+        type: string
+      verify_release_version:
+        description: 核对发布标签是否匹配插件版本。
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ inputs.checkout_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Test, vet, and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        run: |
+          gofmt -l . | tee /tmp/gofmt-files
+          test ! -s /tmp/gofmt-files
+
+      - name: Check module files
+        run: go mod tidy -diff
+
+      - name: Verify release version
+        if: inputs.verify_release_version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          version="$(awk -F'"' '/^[[:space:]]*Version[[:space:]]*=/ {print $2; exit}' internal/basispoints/types.go)"
+          test -n "$version"
+          test "$RELEASE_TAG" = "v$version"
+
+      - name: Check GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        env:
+          GOTOOLCHAIN: auto
+
+      - name: Run tests
+        run: go test -race ./...
+
+      - name: Run vet
+        run: go vet ./...

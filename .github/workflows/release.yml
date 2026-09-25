@@ -1,0 +1,309 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 重新构建并发布已有标签，例如 v0.1.0。
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ format('refs/tags/{0}', inputs.release_tag || github.ref_name) }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  RELEASE_REF: ${{ format('refs/tags/{0}', inputs.release_tag || github.ref_name) }}
+  PLUGIN_ID: gpt365
+
+jobs:
+  check:
+    name: Verify tagged source
+    uses: ./.github/workflows/check.yml
+    with:
+      checkout_ref: ${{ format('refs/tags/{0}', inputs.release_tag || github.ref_name) }}
+      release_tag: ${{ inputs.release_tag || github.ref_name }}
+      verify_release_version: true
+
+  build:
+    needs: check
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-amd64
+            runner: macos-15-intel
+            os: darwin
+            arch: amd64
+            extension: dylib
+          - target: darwin-arm64
+            runner: macos-15
+            os: darwin
+            arch: arm64
+            extension: dylib
+          - target: linux-amd64
+            runner: ubuntu-24.04
+            os: linux
+            arch: amd64
+            extension: so
+            image: quay.io/pypa/manylinux2014_x86_64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            extension: so
+            image: quay.io/pypa/manylinux2014_aarch64
+          - target: windows-amd64
+            runner: windows-2025
+            os: windows
+            arch: amd64
+            extension: dll
+            cc: gcc
+            cc_target: x86_64-w64-mingw32
+            objdump: objdump
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify native runner architecture
+        if: matrix.os != 'windows'
+        run: |
+          test "$(go env GOOS)" = "${{ matrix.os }}"
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+
+      - name: Verify native Windows runner architecture
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          if ((go env GOOS) -ne $env:TARGET_OS) {
+            throw "Expected GOOS=$($env:TARGET_OS), got $(go env GOOS)"
+          }
+          if ((go env GOARCH) -ne $env:TARGET_ARCH) {
+            throw "Expected GOARCH=$($env:TARGET_ARCH), got $(go env GOARCH)"
+          }
+
+      - name: Restore manylinux build cache
+        if: matrix.os == 'linux'
+        uses: actions/cache@v5
+        with:
+          path: .cache/manylinux-${{ matrix.arch }}
+          key: manylinux2014-${{ matrix.arch }}-${{ hashFiles('go.mod', 'go.sum', '**/*.go') }}
+          restore-keys: |
+            manylinux2014-${{ matrix.arch }}-
+
+      - name: Build macOS plugin
+        if: matrix.os == 'darwin'
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          EXTENSION: ${{ matrix.extension }}
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=darwin GOARCH="$TARGET_ARCH" \
+            go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" -buildmode=c-shared \
+            -o "dist/${PLUGIN_ID}.${EXTENSION}" .
+          rm -f "dist/${PLUGIN_ID}.h"
+
+      - name: Build Linux plugin with manylinux2014
+        if: matrix.os == 'linux'
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_IMAGE: ${{ matrix.image }}
+          EXTENSION: ${{ matrix.extension }}
+        run: |
+          mkdir -p dist
+          go_root="$(go env GOROOT)"
+          cache_root="$GITHUB_WORKSPACE/.cache/manylinux-${TARGET_ARCH}"
+          mkdir -p "$cache_root/build" "$cache_root/mod"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -v "$go_root:/opt/go:ro" \
+            -e HOME=/tmp -e GOROOT=/opt/go -e TARGET_ARCH -e PLUGIN_ID -e EXTENSION \
+            -e GOCACHE="/src/.cache/manylinux-${TARGET_ARCH}/build" \
+            -e GOMODCACHE="/src/.cache/manylinux-${TARGET_ARCH}/mod" \
+            "$TARGET_IMAGE" \
+            bash -euo pipefail -c '
+              export PATH="$GOROOT/bin:$PATH"
+              CGO_ENABLED=1 GOOS=linux GOARCH="$TARGET_ARCH" \
+                go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" \
+                -buildmode=c-shared \
+                -o "dist/${PLUGIN_ID}.${EXTENSION}" .
+              rm -f "dist/${PLUGIN_ID}.h"
+            '
+
+      - name: Build Windows plugin
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_CC: ${{ matrix.cc }}
+          EXPECTED_CC_TARGET: ${{ matrix.cc_target }}
+          EXTENSION: ${{ matrix.extension }}
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          & $env:TARGET_CC --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to run Windows compiler: $env:TARGET_CC"
+          }
+          $compilerTarget = (& $env:TARGET_CC -dumpmachine).Trim()
+          if ($compilerTarget -ne $env:EXPECTED_CC_TARGET) {
+            throw "Expected compiler target $env:EXPECTED_CC_TARGET, got $compilerTarget"
+          }
+
+          $env:CGO_ENABLED = "1"
+          $env:GOOS = "windows"
+          $env:GOARCH = $env:TARGET_ARCH
+          $env:CC = $env:TARGET_CC
+          go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" `
+            -buildmode=c-shared `
+            -o "dist/$($env:PLUGIN_ID).$($env:EXTENSION)" .
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows plugin build failed"
+          }
+          Remove-Item "dist/$($env:PLUGIN_ID).h" -Force -ErrorAction SilentlyContinue
+
+      - name: Verify and package Unix plugin
+        if: matrix.os != 'windows'
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          EXTENSION: ${{ matrix.extension }}
+        run: |
+          binary="dist/${PLUGIN_ID}.${EXTENSION}"
+          test -s "$binary"
+          file "$binary"
+          if [ "$TARGET_OS" = "linux" ]; then
+            nm -D --defined-only "$binary" | awk '{print $NF}' > dist/exports.txt
+            grep -qx cliproxy_plugin_init dist/exports.txt
+          else
+            nm -gU "$binary" | awk '{print $NF}' > dist/exports.txt
+            grep -qx _cliproxy_plugin_init dist/exports.txt
+          fi
+          version="${RELEASE_TAG#v}"
+
+          release_archive="${PLUGIN_ID}_${version}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$release_archive" -C dist "${PLUGIN_ID}.${EXTENSION}"
+          test "$(tar -tzf "$release_archive")" = "${PLUGIN_ID}.${EXTENSION}"
+
+          store_archive="${PLUGIN_ID}_${version}_${TARGET_OS}_${TARGET_ARCH}.zip"
+          zip -j "$store_archive" "$binary"
+          test "$(unzip -Z1 "$store_archive")" = "${PLUGIN_ID}.${EXTENSION}"
+
+      - name: Verify and package Windows plugin
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          EXTENSION: ${{ matrix.extension }}
+          TARGET_OBJDUMP: ${{ matrix.objdump }}
+        run: |
+          $binary = "dist/$($env:PLUGIN_ID).$($env:EXTENSION)"
+          if (-not (Test-Path $binary) -or (Get-Item $binary).Length -eq 0) {
+            throw "Missing or empty plugin binary: $binary"
+          }
+          Get-Item $binary
+
+          $exports = & $env:TARGET_OBJDUMP -p $binary
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to inspect plugin binary with $env:TARGET_OBJDUMP"
+          }
+          if (-not ($exports | Select-String -Pattern "\bcliproxy_plugin_init\b" -Quiet)) {
+            throw "Plugin binary does not export cliproxy_plugin_init"
+          }
+          $version = $env:RELEASE_TAG -replace '^v', ''
+
+          $storeArchive = "$($env:PLUGIN_ID)_${version}_$($env:TARGET_OS)_$($env:TARGET_ARCH).zip"
+          Compress-Archive -Path $binary -DestinationPath $storeArchive -Force
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($storeArchive)
+          try {
+            $entries = @($archive.Entries | ForEach-Object FullName)
+            if ($entries.Count -ne 1 -or $entries[0] -ne "$($env:PLUGIN_ID).$($env:EXTENSION)") {
+              throw "Unexpected archive contents: $($entries -join ', ')"
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.target }}
+          path: |
+            ${{ env.PLUGIN_ID }}_*_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            ${{ env.PLUGIN_ID }}_*_${{ matrix.os }}_${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - check
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Download release packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: |
+          sha256sum ${PLUGIN_ID}_*.tar.gz ${PLUGIN_ID}_*.zip | sort > checksums.txt
+          cat checksums.txt
+
+      - name: Extract version release notes
+        run: |
+          awk -v tag="$RELEASE_TAG" '
+            $1 == "##" { if (found) exit; found = ($2 == tag); next }
+            found { print }
+          ' CHANGELOG.md > release-assets/RELEASE_NOTES.md
+          test -s release-assets/RELEASE_NOTES.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-assets/RELEASE_NOTES.md
+          generate_release_notes: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.zip
+            release-assets/checksums.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true

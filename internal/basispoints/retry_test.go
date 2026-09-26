@@ -17,6 +17,9 @@ import (
 
 // TestUpstreamRetriesTransportFailure 首次连接失败后应重试并成功。
 func TestUpstreamRetriesTransportFailure(t *testing.T) {
+	// 必须清空代理环境变量：它们会被 normalize 用来启用代理链，
+	// 让本该直连本地测试服务器的用例打到真实代理上。
+	clearProxyEnv(t)
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&attempts, 1)
@@ -66,6 +69,7 @@ func TestUpstreamRetriesTransportFailure(t *testing.T) {
 //
 // 这类错误说明上游已作出判定，重试既无意义又可能加重限流。
 func TestUpstreamDoesNotRetryHTTPError(t *testing.T) {
+	clearProxyEnv(t)
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&attempts, 1)
@@ -100,6 +104,7 @@ func TestUpstreamDoesNotRetryHTTPError(t *testing.T) {
 
 // TestUpstreamGivesUpAfterMaxAttempts 持续连接失败应在上限后放弃。
 func TestUpstreamGivesUpAfterMaxAttempts(t *testing.T) {
+	clearProxyEnv(t)
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&attempts, 1)
@@ -165,6 +170,7 @@ func TestEnvOverridesProxyChain(t *testing.T) {
 //
 // 本仓库是公开的，一旦默认值里带上口令就等于公开泄露。
 func TestDefaultConfigHasNoCredentials(t *testing.T) {
+	clearProxyEnv(t)
 	cfg := defaultConfig()
 	if cfg.ProxyChain.RemotePassword != "" {
 		t.Error("默认配置不得包含远程代理口令")
@@ -179,6 +185,7 @@ func TestDefaultConfigHasNoCredentials(t *testing.T) {
 
 // TestPersistedSettingsDropRemotePassword 持久化时必须剔除口令。
 func TestPersistedSettingsDropRemotePassword(t *testing.T) {
+	clearProxyEnv(t)
 	dir := t.TempDir()
 	cfg := defaultConfig()
 	cfg.DataDir = dir

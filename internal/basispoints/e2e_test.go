@@ -123,37 +123,28 @@ func TestLiveServiceExecuteStream(t *testing.T) {
 		"Model":           cfg.Models[0],
 		"Format":          "openai-response",
 		"Stream":          true,
+		"stream_id":       "e2e-stream-1",
 		"OriginalRequest": requestBody,
 		"StorageJSON":     credentialJSON,
 	})
 
+	// 流式走异步转发：本调用只返回响应头，数据由 host.stream.emit 推送。
+	// 完整的行为验证见 TestLiveAsyncStreaming。
 	result, err := service.execute(json.RawMessage(executorRequest), true)
 	if err != nil {
 		skipIfRateLimited(t, err)
 		t.Fatalf("流式 execute 失败: %v", err)
 	}
 	payload, _ := result.(map[string]any)
-	raw, _ := payload["Payload"].([]byte)
-	stream := string(raw)
-	t.Logf("流式返回 %d 字节", len(raw))
-
-	for _, want := range []string{
-		"event: response.created",
-		"event: response.output_item.added",
-		"event: response.completed",
-		"data: [DONE]",
-	} {
-		if !strings.Contains(stream, want) {
-			t.Errorf("SSE 流缺少 %q", want)
-		}
-	}
-	if !strings.Contains(stream, "PONG") {
-		t.Errorf("SSE 流中未找到助手正文 PONG")
-	}
 	headers, _ := payload["Headers"].(map[string][]string)
 	if len(headers["Content-Type"]) == 0 || !strings.Contains(headers["Content-Type"][0], "event-stream") {
 		t.Errorf("Content-Type 应为 text/event-stream，实际 %v", headers)
 	}
+	// 不应再返回整段 SSE：那是旧的全缓冲行为，会让客户端干等。
+	if raw, ok := payload["Payload"].([]byte); ok && len(raw) > 0 {
+		t.Errorf("流式响应不应内联返回正文（%d 字节），应通过 stream.emit 推送", len(raw))
+	}
+	t.Log("流式返回响应头，数据走异步推送")
 }
 
 // skipIfRateLimited 区分「上游限流」与「实现缺陷」。

@@ -73,6 +73,8 @@ func TestLiveSingleHopRemoteProxy(t *testing.T) {
 // 只验证能构造出可用的客户端，不强制要求能访问上游——
 // 运行环境是否可直连上游由部署方决定。
 func TestLiveDirectConnection(t *testing.T) {
+	// 清空代理环境变量，确保测的是「默认配置」而不是运行环境的代理设置。
+	clearProxyEnv(t)
 	cfg := defaultConfig()
 	if errNormalize := cfg.normalize(); errNormalize != nil {
 		t.Fatalf("默认配置应合法: %v", errNormalize)

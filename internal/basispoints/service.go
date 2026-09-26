@@ -239,6 +239,14 @@ func (s *Service) execute(raw json.RawMessage, stream bool) (any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration(cfg))
 	defer cancel()
 
+	// 流式请求走异步转发：正文边收边发，客户端立刻能看到内容。
+	//
+	// 早期实现把整个上游流读完再一次性返回，客户端在数十秒内收不到任何
+	// 字节，表现为「对话卡住」并被主动放弃（HTTP 499）。
+	if stream {
+		return s.executeStreamAsync(request, cfg, source, body, c)
+	}
+
 	upstream, errUpstream := s.doUpstream(ctx, cfg, body, c, stream)
 	if errUpstream != nil {
 		return nil, errUpstream
